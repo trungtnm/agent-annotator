@@ -9,6 +9,7 @@ prompt** that gives Claude Code, Codex or Cursor the exact **file and line** of 
 component chain and the live props: no more "the button, top right, the grey one".
 
 [![CI](https://github.com/trungtnm/agent-annotator/actions/workflows/ci.yml/badge.svg)](https://github.com/trungtnm/agent-annotator/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@trungtnm/agent-annotator)](https://www.npmjs.com/package/@trungtnm/agent-annotator)
 ![React 19](https://img.shields.io/badge/React-19-61dafb)
 ![Next.js and Vite](https://img.shields.io/badge/works%20with-Next.js%20%C2%B7%20Vite-6d4aff)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
@@ -38,9 +39,7 @@ agent-annotator closes that gap from where you already are, the running app:
 ## Quick start
 
 ```bash
-pnpm add -D @trungtnm/agent-annotator
-# before the first npm release:
-pnpm add -D github:trungtnm/agent-annotator#v0.2.0
+pnpm add -D @trungtnm/agent-annotator   # or: npm i -D / yarn add -D / bun add -d
 ```
 
 **Next.js (App Router)**: a client component in the root layout, loaded in development only:
