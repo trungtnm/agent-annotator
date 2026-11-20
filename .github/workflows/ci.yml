@@ -23,6 +23,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - name: demo typechecks
+        run: pnpm --dir examples/demo install --frozen-lockfile --ignore-workspace && pnpm --dir examples/demo typecheck
       # dist/ is committed so the repo works as a git dependency; it must match the source.
       - name: dist is up to date
         run: git diff --exit-code -- dist

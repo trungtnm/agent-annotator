@@ -59,7 +59,7 @@ function roleOf(element: Element): string | null {
 function textOfIds(element: Element, ids: string): string {
   return ids
     .split(/\s+/)
-    .map((id) => element.ownerDocument.getElementById(id)?.textContent ?? '')
+    .map((id) => visibleText(element.ownerDocument.getElementById(id)))
     .join(' ');
 }
 
@@ -69,8 +69,8 @@ function accessibleName(element: Element): string {
   const labelledBy = element.getAttribute('aria-labelledby');
   if (labelledBy) return textOfIds(element, labelledBy);
   const labels = (element as HTMLInputElement).labels;
-  if (labels && labels.length > 0) return Array.from(labels, (node) => node.textContent ?? '').join(' ');
-  return element.getAttribute('alt') ?? element.getAttribute('title') ?? element.textContent ?? '';
+  if (labels && labels.length > 0) return Array.from(labels, (node) => visibleText(node)).join(' ');
+  return element.getAttribute('alt') ?? element.getAttribute('title') ?? visibleText(element);
 }
 
 function clean(text: string, max: number): string {
@@ -102,7 +102,8 @@ function sectionLabel(section: Element): string | null {
   if (label) return label;
   const labelledBy = section.getAttribute('aria-labelledby');
   if (labelledBy) return textOfIds(section, labelledBy);
-  return section.querySelector(SECTION_TITLE)?.textContent ?? null;
+  const title = section.querySelector(SECTION_TITLE);
+  return title === null ? null : visibleText(title);
 }
 
 /**
@@ -117,7 +118,7 @@ export function sectionPath(element: Element): string | null {
   }
   const pageHeading = element.ownerDocument.querySelector('h1');
   if (pageHeading && !pageHeading.contains(element)) {
-    const heading = clean(pageHeading.textContent ?? '', 50);
+    const heading = clean(visibleText(pageHeading), 50);
     if (heading && labels[0] !== heading) labels.unshift(heading);
   }
   const path = labels.filter((label) => label !== '');
@@ -126,9 +127,19 @@ export function sectionPath(element: Element): string | null {
 
 /** The text just before and after the element, which tells two identical buttons apart. */
 export function nearbyText(element: Element): string | null {
-  const before = element.previousElementSibling?.textContent ?? '';
-  const after = element.nextElementSibling?.textContent ?? '';
+  const before = visibleText(element.previousElementSibling);
+  const after = visibleText(element.nextElementSibling);
   const parts = [clean(before, 60), clean(after, 60)];
   if (parts[0] === '' && parts[1] === '') return null;
   return `before: "${parts[0]}" · after: "${parts[1]}"`;
+}
+
+/**
+ * Text as the page shows it: `innerText` keeps the breaks between blocks ("Title" + "Body",
+ * not "TitleBody"); `textContent` is the fallback where there is no layout (tests).
+ */
+function visibleText(node: Element | null | undefined): string {
+  if (node === null || node === undefined) return '';
+  const raw = node instanceof HTMLElement && typeof node.innerText === 'string' ? node.innerText : node.textContent;
+  return (raw ?? '').replace(/\s+/g, ' ').trim();
 }

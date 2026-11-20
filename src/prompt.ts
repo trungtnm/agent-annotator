@@ -142,7 +142,9 @@ function targetLines(capture: ElementCapture, options: PromptOptions): string[] 
 
 function dataBlocks(capture: ElementCapture, options: PromptOptions): string[] {
   if (!options.includeData) return [];
-  return capture.data.flatMap((block) => [
+  // A component with no props and no state has nothing to tell the agent.
+  const telling = capture.data.filter((block) => !isEmpty(block.props) || !isEmpty(block.state));
+  return telling.flatMap((block) => [
     '',
     `**Data of \`${block.component}\`** (state in hook call order):`,
     '',
@@ -196,4 +198,10 @@ function formatTime(date: Date): string {
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
     `${pad(date.getHours())}:${pad(date.getMinutes())}`
   );
+}
+
+function isEmpty(snapshot: ElementCapture['data'][number]['props']): boolean {
+  if (snapshot === null) return true;
+  if (Array.isArray(snapshot)) return snapshot.length === 0;
+  return typeof snapshot === 'object' && Object.keys(snapshot).length === 0;
 }

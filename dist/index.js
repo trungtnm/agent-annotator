@@ -193,7 +193,7 @@ function roleOf(element) {
   return IMPLICIT_ROLES[tag] ?? null;
 }
 function textOfIds(element, ids) {
-  return ids.split(/\s+/).map((id) => element.ownerDocument.getElementById(id)?.textContent ?? "").join(" ");
+  return ids.split(/\s+/).map((id) => visibleText(element.ownerDocument.getElementById(id))).join(" ");
 }
 function accessibleName(element) {
   const label = element.getAttribute("aria-label");
@@ -201,8 +201,8 @@ function accessibleName(element) {
   const labelledBy = element.getAttribute("aria-labelledby");
   if (labelledBy) return textOfIds(element, labelledBy);
   const labels = element.labels;
-  if (labels && labels.length > 0) return Array.from(labels, (node) => node.textContent ?? "").join(" ");
-  return element.getAttribute("alt") ?? element.getAttribute("title") ?? element.textContent ?? "";
+  if (labels && labels.length > 0) return Array.from(labels, (node) => visibleText(node)).join(" ");
+  return element.getAttribute("alt") ?? element.getAttribute("title") ?? visibleText(element);
 }
 function clean(text, max) {
   return truncate(redactText(text.replace(/\s+/g, " ").trim()), max);
@@ -229,7 +229,8 @@ function sectionLabel(section2) {
   if (label) return label;
   const labelledBy = section2.getAttribute("aria-labelledby");
   if (labelledBy) return textOfIds(section2, labelledBy);
-  return section2.querySelector(SECTION_TITLE)?.textContent ?? null;
+  const title = section2.querySelector(SECTION_TITLE);
+  return title === null ? null : visibleText(title);
 }
 function sectionPath(element) {
   const labels = [];
@@ -239,18 +240,23 @@ function sectionPath(element) {
   }
   const pageHeading = element.ownerDocument.querySelector("h1");
   if (pageHeading && !pageHeading.contains(element)) {
-    const heading = clean(pageHeading.textContent ?? "", 50);
+    const heading = clean(visibleText(pageHeading), 50);
     if (heading && labels[0] !== heading) labels.unshift(heading);
   }
   const path = labels.filter((label) => label !== "");
   return path.length === 0 ? null : path.join(" \u203A ");
 }
 function nearbyText(element) {
-  const before = element.previousElementSibling?.textContent ?? "";
-  const after = element.nextElementSibling?.textContent ?? "";
+  const before = visibleText(element.previousElementSibling);
+  const after = visibleText(element.nextElementSibling);
   const parts = [clean(before, 60), clean(after, 60)];
   if (parts[0] === "" && parts[1] === "") return null;
   return `before: "${parts[0]}" \xB7 after: "${parts[1]}"`;
+}
+function visibleText(node) {
+  if (node === null || node === void 0) return "";
+  const raw = node instanceof HTMLElement && typeof node.innerText === "string" ? node.innerText : node.textContent;
+  return (raw ?? "").replace(/\s+/g, " ").trim();
 }
 
 // src/fiber.ts
@@ -491,6 +497,10 @@ function originalPosition(map, line1, column1) {
 }
 function sourcePath(source) {
   if (source.startsWith("file://")) return decodeURIComponent(source.slice("file://".length));
+  if (/^https?:\/\//.test(source)) {
+    const path = decodeURIComponent(new URL(source).pathname);
+    return path.startsWith("/@fs/") ? path.slice("/@fs".length) : path.replace(/^\//, "");
+  }
   if (/^turbopack:\/\/\/\[turbopack\]/.test(source)) return null;
   return source;
 }
@@ -500,14 +510,16 @@ function createSourceMapLookup(fetchImpl) {
   const load = (url) => {
     let pending = maps.get(url);
     if (pending === void 0) {
-      pending = fetchMap(fetchImpl, `${url}.map`);
+      pending = fetchMap(fetchImpl, `${url.replace(/[?#].*$/, "")}.map`).then(
+        (beside) => beside ?? mapFromScript(fetchImpl, url)
+      );
       maps.set(url, pending);
     }
     return pending;
   };
   return async (frame) => {
-    if (!/^https?:\/\/[^?#]+\.(?:m?js|cjs)(?:[?#].*)?$/.test(frame.file)) return null;
-    const map = await load(frame.file.replace(/[?#].*$/, ""));
+    if (!/^https?:\/\//.test(frame.file)) return null;
+    const map = await load(frame.file.replace(/#.*$/, ""));
     if (map === null) return null;
     const original = originalPosition(map, frame.line1, frame.column1);
     const file = original === null ? null : sourcePath(original.source);
@@ -521,17 +533,65 @@ function createSourceMapLookup(fetchImpl) {
     };
   };
 }
+var MAPPING_URL = /\/\/[#@] sourceMappingURL=(\S+)\s*$/;
+async function mapFromScript(fetchImpl, url) {
+  const script = await fetchText(fetchImpl, url);
+  const tail = script?.slice(-2e5).trimEnd();
+  const reference = tail === void 0 ? void 0 : MAPPING_URL.exec(tail)?.[1];
+  if (reference === void 0) return null;
+  const inline = /^data:application\/json(?:;charset=[^;,]+)?;base64,(.*)$/i.exec(reference);
+  if (inline?.[1] !== void 0) {
+    try {
+      const bytes = Uint8Array.from(atob(inline[1]), (char) => char.charCodeAt(0));
+      return asSourceMap(JSON.parse(new TextDecoder().decode(bytes)), url);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await fetchMap(fetchImpl, new URL(reference, url).href);
+  } catch {
+    return null;
+  }
+}
+async function fetchText(fetchImpl, url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal });
+    return response.ok ? await response.text() : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function asSourceMap(body, base) {
+  if (typeof body !== "object" || body === null) return null;
+  if ("sections" in body && Array.isArray(body.sections)) return body;
+  if (!("mappings" in body) || !("sources" in body) || !Array.isArray(body.sources)) return null;
+  const root = "sourceRoot" in body && typeof body.sourceRoot === "string" ? body.sourceRoot : "";
+  const prefix = root === "" || root.endsWith("/") ? root : `${root}/`;
+  const relative = (source) => !/^[a-z]+:|^\//i.test(source);
+  const sources = body.sources.map((source) => {
+    if (typeof source !== "string") return source;
+    const rooted = relative(source) ? `${prefix}${source}` : source;
+    if (base === void 0 || !relative(rooted)) return rooted;
+    try {
+      return new URL(rooted, base).href;
+    } catch {
+      return rooted;
+    }
+  });
+  return { ...body, sources };
+}
 async function fetchMap(fetchImpl, url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const response = await fetchImpl(url, { signal: controller.signal });
     if (!response.ok) return null;
-    const body = await response.json();
-    if (typeof body !== "object" || body === null) return null;
-    if ("sections" in body && Array.isArray(body.sections)) return body;
-    if ("mappings" in body && "sources" in body) return body;
-    return null;
+    return asSourceMap(await response.json(), url);
   } catch {
     return null;
   } finally {
@@ -1709,7 +1769,8 @@ function targetLines(capture, options) {
 }
 function dataBlocks(capture, options) {
   if (!options.includeData) return [];
-  return capture.data.flatMap((block) => [
+  const telling = capture.data.filter((block) => !isEmpty(block.props) || !isEmpty(block.state));
+  return telling.flatMap((block) => [
     "",
     `**Data of \`${block.component}\`** (state in hook call order):`,
     "",
@@ -1751,6 +1812,11 @@ function headline(comment) {
 function formatTime(date) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function isEmpty(snapshot) {
+  if (snapshot === null) return true;
+  if (Array.isArray(snapshot)) return snapshot.length === 0;
+  return typeof snapshot === "object" && Object.keys(snapshot).length === 0;
 }
 
 // src/flags.ts

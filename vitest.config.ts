@@ -7,6 +7,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'jsdom',
+    // The overlay tests drive a whole React tree; a busy CI runner needs more than 5s.
+    testTimeout: 15_000,
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
   },
 });

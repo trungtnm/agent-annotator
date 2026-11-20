@@ -96,6 +96,12 @@ export function originalPosition(map: SourceMapJson, line1: number, column1: num
 /** `file:///repo/apps/x/src/a.tsx` → `/repo/apps/x/src/a.tsx`; Turbopack internals → null. */
 function sourcePath(source: string): string | null {
   if (source.startsWith('file://')) return decodeURIComponent(source.slice('file://'.length));
+  // Served by the dev server: the URL path is the path from the app's root (Vite), or an
+  // absolute file outside it behind `/@fs/`.
+  if (/^https?:\/\//.test(source)) {
+    const path = decodeURIComponent(new URL(source).pathname);
+    return path.startsWith('/@fs/') ? path.slice('/@fs'.length) : path.replace(/^\//, '');
+  }
   if (/^turbopack:\/\/\/\[turbopack\]/.test(source)) return null;
   return source;
 }
@@ -103,8 +109,11 @@ function sourcePath(source: string): string | null {
 const TIMEOUT_MS = 3000;
 
 /**
- * Resolves http(s) chunk frames through `<chunk>.map`; anything else, or any failure, is
- * `null` so the caller keeps its own fallback. Each map is fetched once.
+ * Resolves frames of scripts served over http(s) by the dev server; anything else, or any
+ * failure, is `null` so the caller keeps its own fallback. The map is looked for beside
+ * the script (`<url>.map`, Next.js/Turbopack), then through the script's own
+ * `sourceMappingURL` (an inline `data:` map in Vite, a relative URL elsewhere). Each
+ * script's map is loaded once.
  */
 export function createSourceMapLookup(
   fetchImpl: typeof fetch,
@@ -113,16 +122,17 @@ export function createSourceMapLookup(
   const load = (url: string): Promise<SourceMapJson | null> => {
     let pending = maps.get(url);
     if (pending === undefined) {
-      pending = fetchMap(fetchImpl, `${url}.map`);
+      pending = fetchMap(fetchImpl, `${url.replace(/[?#].*$/, '')}.map`).then(
+        (beside) => beside ?? mapFromScript(fetchImpl, url),
+      );
       maps.set(url, pending);
     }
     return pending;
   };
 
   return async (frame) => {
-    // Any script served over http(s) by the dev server: its map sits beside it as `<url>.map`.
-    if (!/^https?:\/\/[^?#]+\.(?:m?js|cjs)(?:[?#].*)?$/.test(frame.file)) return null;
-    const map = await load(frame.file.replace(/[?#].*$/, ''));
+    if (!/^https?:\/\//.test(frame.file)) return null;
+    const map = await load(frame.file.replace(/#.*$/, ''));
     if (map === null) return null;
     const original = originalPosition(map, frame.line1, frame.column1);
     const file = original === null ? null : sourcePath(original.source);
@@ -137,17 +147,75 @@ export function createSourceMapLookup(
   };
 }
 
+const MAPPING_URL = /\/\/[#@] sourceMappingURL=(\S+)\s*$/;
+
+/** The map a script names in its last `sourceMappingURL` comment. */
+async function mapFromScript(fetchImpl: typeof fetch, url: string): Promise<SourceMapJson | null> {
+  const script = await fetchText(fetchImpl, url);
+  const tail = script?.slice(-200_000).trimEnd();
+  const reference = tail === undefined ? undefined : MAPPING_URL.exec(tail)?.[1];
+  if (reference === undefined) return null;
+  const inline = /^data:application\/json(?:;charset=[^;,]+)?;base64,(.*)$/i.exec(reference);
+  if (inline?.[1] !== undefined) {
+    try {
+      const bytes = Uint8Array.from(atob(inline[1]), (char) => char.charCodeAt(0));
+      return asSourceMap(JSON.parse(new TextDecoder().decode(bytes)), url);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await fetchMap(fetchImpl, new URL(reference, url).href);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchText(fetchImpl: typeof fetch, url: string): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal });
+    return response.ok ? await response.text() : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A plain map's sources, resolved the way consumers do: against its `sourceRoot`, then a
+ * still-relative one against the map's own URL (Vite writes `Header.tsx` for
+ * `/src/components/Header.tsx`).
+ */
+function asSourceMap(body: unknown, base?: string): SourceMapJson | null {
+  if (typeof body !== 'object' || body === null) return null;
+  if ('sections' in body && Array.isArray(body.sections)) return body as SourceMapJson;
+  if (!('mappings' in body) || !('sources' in body) || !Array.isArray(body.sources)) return null;
+  const root = 'sourceRoot' in body && typeof body.sourceRoot === 'string' ? body.sourceRoot : '';
+  const prefix = root === '' || root.endsWith('/') ? root : `${root}/`;
+  const relative = (source: string): boolean => !/^[a-z]+:|^\//i.test(source);
+  const sources = (body.sources as unknown[]).map((source) => {
+    if (typeof source !== 'string') return source;
+    const rooted = relative(source) ? `${prefix}${source}` : source;
+    if (base === undefined || !relative(rooted)) return rooted;
+    try {
+      return new URL(rooted, base).href;
+    } catch {
+      return rooted;
+    }
+  });
+  return { ...(body as object), sources } as unknown as SourceMapJson;
+}
+
 async function fetchMap(fetchImpl: typeof fetch, url: string): Promise<SourceMapJson | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const response = await fetchImpl(url, { signal: controller.signal });
     if (!response.ok) return null;
-    const body: unknown = await response.json();
-    if (typeof body !== 'object' || body === null) return null;
-    if ('sections' in body && Array.isArray(body.sections)) return body as SourceMapJson;
-    if ('mappings' in body && 'sources' in body) return body as SourceMapJson;
-    return null;
+    return asSourceMap(await response.json(), url);
   } catch {
     return null;
   } finally {

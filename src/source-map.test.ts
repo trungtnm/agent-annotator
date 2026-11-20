@@ -90,3 +90,36 @@ describe('Next frame resolver under Turbopack', () => {
     ]);
   });
 });
+
+describe('a script with its map inline (Vite)', () => {
+  it('reads the sourceMappingURL data: map when there is no .map beside the script', async () => {
+    const map = { version: 3, sources: ['App.tsx'], sourceRoot: '/repo/examples/demo/src/', mappings: ['', `${vlq([4, 0, 11, 6])}`].join(';') };
+    const encoded = btoa(JSON.stringify(map));
+    const url = 'http://localhost:5173/src/App.tsx?t=1700000000';
+    const fetchImpl = vi.fn(async (requested: string | URL | Request) => {
+      const target = String(requested);
+      if (target.endsWith('.map')) return new Response('not found', { status: 404 });
+      expect(target).toBe(url);
+      return new Response(`export function App() {}\n//# sourceMappingURL=data:application/json;base64,${encoded}\n`);
+    });
+    const lookup = createSourceMapLookup(fetchImpl as typeof fetch);
+    expect(await lookup({ file: url, line1: 2, column1: 10, methodName: 'App' })).toEqual({
+      file: '/repo/examples/demo/src/App.tsx',
+      line: 12,
+      column: 7,
+      mapped: true,
+    });
+  });
+
+  it('gives a relative source its path from the app root, through the module URL', async () => {
+    const map = { version: 3, sources: ['Header.tsx'], mappings: ['', `${vlq([4, 0, 16, 8])}`].join(';') };
+    const url = 'http://localhost:5173/src/components/Header.tsx';
+    const fetchImpl = vi.fn(async (requested: string | URL | Request) =>
+      String(requested).endsWith('.map')
+        ? new Response('not found', { status: 404 })
+        : new Response(`x\n//# sourceMappingURL=data:application/json;base64,${btoa(JSON.stringify(map))}`),
+    );
+    const location = await createSourceMapLookup(fetchImpl as typeof fetch)({ file: url, line1: 2, column1: 10, methodName: 'Header' });
+    expect(location).toEqual({ file: 'src/components/Header.tsx', line: 17, column: 9, mapped: true });
+  });
+});

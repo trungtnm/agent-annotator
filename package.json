@@ -1,6 +1,6 @@
 {
   "name": "@trungtnm/agent-annotator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A development-only overlay for React apps: comment on elements, text and areas of the running UI, then copy one Markdown prompt for a coding agent (JSX file:line, component chain and PII-redacted props/state per comment), or capture the tab and mark it up like Shottr.",
   "license": "MIT",
   "author": "trungtnm",
@@ -10,7 +10,16 @@
   },
   "homepage": "https://github.com/trungtnm/agent-annotator#readme",
   "bugs": "https://github.com/trungtnm/agent-annotator/issues",
-  "keywords": ["react", "nextjs", "devtools", "annotation", "ai", "coding-agent", "prompt", "screenshot"],
+  "keywords": [
+    "react",
+    "nextjs",
+    "devtools",
+    "annotation",
+    "ai",
+    "coding-agent",
+    "prompt",
+    "screenshot"
+  ],
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -22,7 +31,11 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "packageManager": "pnpm@10.15.0",
   "engines": {
     "node": ">=20"
@@ -33,10 +46,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
-    "prepublishOnly": "pnpm check"
+    "prepublishOnly": "pnpm check",
+    "media:shots": "node scripts/media/record.mjs shots",
+    "media:video": "node scripts/media/record.mjs video && node scripts/media/compose.mjs"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   },
   "peerDependencies": {
     "react": "^19.0.0",
@@ -52,6 +69,7 @@
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.7.0",
     "jsdom": "29.1.1",
+    "playwright": "1.61.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "tsup": "8.5.1",
