@@ -406,3 +406,64 @@ tbody tr:hover {
   font-size: 14px;
   text-decoration: none;
 }
+
+/* Customers (privacy demo) */
+.customers-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+  align-items: start;
+}
+tbody tr.selected {
+  background: var(--violet-soft);
+}
+tbody tr {
+  cursor: pointer;
+}
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.detail .card-head {
+  margin-bottom: 0;
+}
+.facts {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 14px;
+}
+.facts dt {
+  color: var(--muted);
+}
+.facts dd {
+  margin: 0;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.field input,
+.field textarea {
+  font: inherit;
+  font-weight: 400;
+  color: var(--ink);
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  resize: vertical;
+}
+.btn.primary {
+  border: 0;
+  background: var(--violet);
+  color: #fff;
+}
+.customers-grid td.mono {
+  white-space: nowrap;
+}
