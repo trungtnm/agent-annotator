@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -143,6 +143,43 @@ describe('DevAnnotator', () => {
     await user.click(await screen.findByRole('button', { name: 'Copy prompt' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText.mock.calls[0]?.[0]).toContain('- **Selected text:** "Liên hệ [redacted] để được hỗ trợ"');
+  });
+
+  it('redaction settings: a switch turns screening off for new comments, and countries and patterns add to it', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    render(
+      <>
+        <button type="button">Gọi 0912345678</button>
+        <button type="button">SSN 123-45-6789, ref INV-123456</button>
+        <DevAnnotator appName="backoffice" resolveFrames={resolveFrames} redaction={{ patterns: ['INV-\\d{6}'] }} />
+      </>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Redaction settings' }));
+    const settings = screen.getByRole('dialog', { name: 'Redaction settings' });
+    expect((within(settings).getByRole('textbox') as HTMLTextAreaElement).value).toBe('INV-\\d{6}');
+    await user.click(within(settings).getByRole('checkbox', { name: /United States/ }));
+
+    await user.click(screen.getByRole('button', { name: /Turn on comment mode/ }));
+    await addComment(user, 'SSN 123-45-6789, ref INV-123456', 'Screened');
+    await user.click(within(settings).getByRole('switch', { name: 'Redact personal data' }));
+    await addComment(user, 'Gọi 0912345678', 'Raw');
+
+    await user.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const prompt = writeText.mock.calls[0]?.[0] ?? '';
+    expect(prompt).toContain('text "SSN [redacted], ref [redacted]"');
+    expect(prompt).toContain('text "Gọi 0912345678"');
+    expect(prompt).toContain('(except in comment 2, recorded with redaction off)');
+    expect(JSON.parse(window.localStorage.getItem('agent-annotator:redaction:backoffice') ?? 'null')).toEqual({
+      enabled: false,
+      countries: ['vn', 'us'],
+      patterns: ['INV-\\d{6}'],
+    });
+
+    await user.click(within(settings).getByRole('button', { name: 'Use app defaults' }));
+    expect((within(settings).getByRole('switch', { name: 'Redact personal data' }) as HTMLInputElement).checked).toBe(true);
+    expect(window.localStorage.getItem('agent-annotator:redaction:backoffice')).toBeNull();
   });
 
   it('keeps comments across a remount through sessionStorage, and the pin finds its element again', async () => {

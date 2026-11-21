@@ -1,4 +1,5 @@
-import { REDACTED, redactText, truncate } from './serialize';
+import { DEFAULT_REDACTOR, REDACTED, type Redactor } from './redaction';
+import { truncate } from './serialize';
 
 /** Ancestors climbed before the selector settles for what it has. */
 const MAX_DEPTH = 6;
@@ -71,11 +72,11 @@ const DESCRIBED_ATTRIBUTES = [
 ] as const;
 
 /** `<button type="submit" aria-label="Save" class="…">`: the opening tag, abridged and screened. */
-export function describeElement(element: Element): string {
+export function describeElement(element: Element, redactor: Redactor = DEFAULT_REDACTOR): string {
   const parts = [element.tagName.toLowerCase()];
   for (const attribute of DESCRIBED_ATTRIBUTES) {
     const value = element.getAttribute(attribute);
-    if (value) parts.push(`${attribute}="${truncate(redactText(value), 60)}"`);
+    if (value) parts.push(`${attribute}="${truncate(redactor.text(value), 60)}"`);
   }
   const className = element.getAttribute('class');
   if (className) parts.push(`class="${truncate(className.trim().replace(/\s+/g, ' '), 120)}"`);
@@ -83,23 +84,23 @@ export function describeElement(element: Element): string {
 }
 
 /** The element's visible text, whitespace collapsed, screened, cut to `max`. */
-export function elementText(element: Element, max = 120): string {
+export function elementText(element: Element, max = 120, redactor: Redactor = DEFAULT_REDACTOR): string {
   // innerText keeps the breaks between blocks ("Title" + "Body", not "TitleBody");
   // textContent is the fallback where there is no layout (tests).
   const raw = element instanceof HTMLElement && typeof element.innerText === 'string' ? element.innerText : element.textContent;
   const text = (raw ?? '').replace(/\s+/g, ' ').trim();
-  return truncate(redactText(text), max);
+  return truncate(redactor.text(text), max);
 }
 
 /** The current value of a form control, which `textContent` never shows. */
-export function controlValue(element: Element): string | null {
+export function controlValue(element: Element, redactor: Redactor = DEFAULT_REDACTOR): string | null {
   if (element instanceof HTMLInputElement) {
     if (element.type === 'password') return REDACTED;
     if (element.type === 'checkbox' || element.type === 'radio') return element.checked ? 'checked' : 'unchecked';
-    return truncate(redactText(element.value), 120);
+    return truncate(redactor.text(element.value), 120);
   }
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-    return truncate(redactText(element.value), 120);
+    return truncate(redactor.text(element.value), 120);
   }
   return null;
 }

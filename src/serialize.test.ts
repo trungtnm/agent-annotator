@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { REDACTED, isPiiKey, redactText, toSnapshot } from './serialize';
+import { DEFAULT_LIMITS, toSnapshot } from './serialize';
+import { REDACTED, createRedactor } from './redaction';
 
 describe('personal data screening', () => {
   it('redacts a value whole when its key names personal data, whatever the casing', () => {
@@ -37,16 +38,12 @@ describe('personal data screening', () => {
     });
   });
 
-  it('screens e-mail, phone and citizen-ID shaped text inside any string', () => {
-    expect(redactText('Gọi 0912 345 678 hoặc +84912345678, mail a.b@tfs.com.vn, CCCD 001234567890'))
-      .toBe(`Gọi ${REDACTED} hoặc ${REDACTED}, mail ${REDACTED}, CCCD ${REDACTED}`);
-  });
-
-  it('leaves amounts, dates and codes alone', () => {
-    expect(redactText('Dư nợ 150000000 đ, 1.250.000.000 đ, hạn 02.03.2026, mã HD123456789012'))
-      .toBe('Dư nợ 150000000 đ, 1.250.000.000 đ, hạn 02.03.2026, mã HD123456789012');
-    expect(isPiiKey('outstandingAmount')).toBe(false);
-    expect(isPiiKey('creditorCode')).toBe(false);
+  it('passes data through untouched when redaction is off', () => {
+    const off = createRedactor({ enabled: false, countries: ['vn'], patterns: [] });
+    expect(toSnapshot({ phone: '0912345678', note: 'mail a@b.vn' }, DEFAULT_LIMITS, off)).toEqual({
+      phone: '0912345678',
+      note: 'mail a@b.vn',
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 import type { ElementCapture } from './capture';
-import { REDACTED } from './serialize';
+import { REDACTED } from './redaction';
 import type { Rect } from './page-tools';
 import type { SourceLocation } from './stack';
 
@@ -28,6 +28,11 @@ export interface Annotation {
    * drawn back over the page after scrolling or a reload. Not part of the prompt.
    */
   readonly areaInContainer?: Rect;
+  /**
+   * `false` when the comment was made with redaction switched off, so its captures hold
+   * the page's data as it was. Comments saved before the setting existed were screened.
+   */
+  readonly redacted?: boolean;
 }
 
 export interface PromptOptions {
@@ -63,13 +68,21 @@ export function buildPrompt(annotations: readonly Annotation[], options: PromptO
       '. The element\'s JSX location is exact; a component\'s "rendered at" location may point at an earlier render ' +
       'branch when React reused the component, so check it against the code. ' +
       'Open the source file before editing. If the line numbers have drifted, search by selector, element text and component name. ' +
-      `Personal data has been replaced with \`${REDACTED}\`; never treat it as a real value. ` +
+      redactionNote(annotations) +
       'When done, summarise the changes by comment number.',
   ];
   annotations.forEach((annotation, index) => {
     lines.push('', '---', '', ...section(annotation, index + 1, options));
   });
   return `${lines.join('\n')}\n`;
+}
+
+/** Claims only what is true: comments made with redaction off are named as such. */
+function redactionNote(annotations: readonly Annotation[]): string {
+  const raw = annotations.flatMap((annotation, index) => (annotation.redacted === false ? [index + 1] : []));
+  if (raw.length === annotations.length && raw.length > 0) return '';
+  const except = raw.length === 0 ? '' : ` (except in comment${raw.length === 1 ? '' : 's'} ${raw.join(', ')}, recorded with redaction off)`;
+  return `Personal data has been replaced with \`${REDACTED}\`${except}; never treat it as a real value. `;
 }
 
 const KIND_NOTE: Readonly<Record<AnnotationKind, string | null>> = {

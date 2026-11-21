@@ -1,14 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
 import { captureElement, hoverLabel, type ElementCapture } from './capture';
 import { layoutCallouts, type CalloutTarget } from './callouts';
 import { AreaBox, boxOf, Callouts, Editor, Highlight, Hint, Panel, Pin, Toast, Toolbar, type ListEntry, type Notice } from './overlay-parts';
+import { RedactionPanel } from './redaction-panel';
 import { elementsInArea, OWN_SELECTOR, pauseMotion, type Rect } from './page-tools';
 import { buildPrompt, type Annotation, type AnnotationKind } from './prompt';
-import { redactText, truncate } from './serialize';
+import { truncate } from './serialize';
+import { createRedactor, readRedaction, resolveRedaction, writeRedaction, type RedactionOptions, type RedactionSettings } from './redaction';
 import { readFlag, writeFlag } from './flags';
 import { CaptureCancelled, captureTab, shotFileName, type ScreenCapture } from './screenshot';
 import { ScreenshotEditor } from './screenshot-editor';
@@ -19,6 +21,12 @@ export interface DevAnnotatorProps {
   readonly appName: string;
   /** The app's directory from the repo root, so source paths in the prompt open as-is. */
   readonly appDir?: string;
+  /**
+   * Personal-data redaction for this app: on or off, which countries' phone and ID
+   * formats to screen, and extra patterns. Each browser can change it from the toolbar's
+   * redaction settings; these are the defaults it starts from and resets to.
+   */
+  readonly redaction?: RedactionOptions;
   /** Overrides how stack frames are mapped to source; tests pass one, apps never do. */
   readonly resolveFrames?: FrameResolver;
   /** Overrides how the tab is captured; tests pass one, apps never do. */
@@ -43,6 +51,8 @@ interface Selection {
 interface Draft extends Selection {
   readonly captures: Promise<readonly ElementCapture[]>;
   readonly comment: string;
+  /** Whether the captures were screened for personal data. */
+  readonly redacted: boolean;
   /** Set when an existing comment is being edited. */
   readonly editingId: string | null;
 }
@@ -84,6 +94,14 @@ const KIND_LABEL: Readonly<Record<AnnotationKind, (count: number) => string>> = 
 export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
   const { appName, appDir } = props;
   const storageKey = `agent-annotator:${appName}`;
+  const redactionKey = `agent-annotator:redaction:${appName}`;
+  const redactionDefaults = resolveRedaction(props.redaction);
+  const [savedRedaction, setSavedRedaction] = useState<RedactionSettings | null>(() => readRedaction(redactionKey));
+  const redaction = savedRedaction ?? redactionDefaults;
+  const redactionJson = JSON.stringify(redaction);
+  // Rebuilt only when a setting changes, not on every render of an inline `redaction` prop.
+  const redactor = useMemo(() => createRedactor(JSON.parse(redactionJson) as RedactionSettings), [redactionJson]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [resolveFrames] = useState<FrameResolver>(() => props.resolveFrames ?? createNextResolver());
   const [active, setActive] = useState(false);
   const [items, setItems] = useState<readonly Item[]>(() => restore(storageKey));
@@ -127,12 +145,14 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
       const several = selection.elements.length > 1;
       const captures = Promise.all(
         selection.elements.map((element) =>
-          captureElement(element, resolveFrames, { dataComponents: several ? 1 : 2 }),
+          captureElement(element, resolveFrames, { dataComponents: several ? 1 : 2, redactor }),
         ),
       );
-      setDraft({ ...selection, captures, comment: '', editingId: null });
+      const screened =
+        selection.selectedText === undefined ? {} : { selectedText: truncate(redactor.text(selection.selectedText), 500) };
+      setDraft({ ...selection, ...screened, captures, comment: '', redacted: redactor.enabled, editingId: null });
     },
-    [resolveFrames],
+    [resolveFrames, redactor],
   );
 
   // Comment mode. Listeners sit on window in the CAPTURE phase, ahead of React's root
@@ -320,6 +340,7 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
       ...(draft.selectedText === undefined ? {} : { selectedText: draft.selectedText }),
       ...(draft.area === undefined ? {} : { area: draft.area }),
       ...(draft.areaInContainer === undefined ? {} : { areaInContainer: draft.areaInContainer }),
+      ...(draft.redacted ? {} : { redacted: false }),
     };
     setItems((current) => [...current, { annotation, elements: draft.elements }]);
     setPanelOpen(true);
@@ -340,6 +361,7 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
       ...(annotation.selectedText === undefined ? {} : { selectedText: annotation.selectedText }),
       captures: Promise.resolve(annotation.targets),
       comment: annotation.comment,
+      redacted: annotation.redacted !== false,
       editingId: id,
     });
   };
@@ -473,10 +495,26 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
           }}
         />
       ) : null}
-      {panelOpen && !collapsed && items.length > 0 ? (
+      {settingsOpen && !collapsed ? (
+        <RedactionPanel
+          settings={redaction}
+          customised={savedRedaction !== null}
+          onChange={(next) => {
+            setSavedRedaction(next);
+            writeRedaction(redactionKey, next);
+          }}
+          onReset={() => {
+            setSavedRedaction(null);
+            writeRedaction(redactionKey, null);
+          }}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
+      {panelOpen && !settingsOpen && !collapsed && items.length > 0 ? (
         <Panel
           entries={entries}
           includeData={includeData}
+          redactionOn={redaction.enabled}
           onIncludeData={setIncludeData}
           onEdit={editItem}
           onClear={() => {
@@ -494,6 +532,9 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
         showComments={showComments}
         capturing={capturing}
         collapsed={collapsed}
+        redactionOn={redaction.enabled}
+        settingsOpen={settingsOpen}
+        onToggleSettings={() => setSettingsOpen(!settingsOpen)}
         onToggleCollapsed={() => {
           setCollapsed(!collapsed);
           writeFlag(COLLAPSED_KEY, !collapsed);
@@ -529,7 +570,7 @@ function areaBox(area: Rect): { top: number; left: number; width: number; height
   return { top: area.y, left: area.x, width: area.width, height: area.height };
 }
 
-/** The page's current text selection, screened, and the element holding it; `null` if none. */
+/** The page's current text selection and the element holding it; `null` if none. Screened by `startDraft`. */
 function selectedText(): { readonly element: Element; readonly text: string } | null {
   const selection = window.getSelection();
   if (selection === null || selection.isCollapsed || selection.rangeCount === 0) return null;
@@ -538,7 +579,7 @@ function selectedText(): { readonly element: Element; readonly text: string } | 
   const node = selection.getRangeAt(0).commonAncestorContainer;
   const element = node instanceof Element ? node : node.parentElement;
   if (element === null || element.closest(OWN_SELECTOR) !== null) return null;
-  return { element, text: truncate(redactText(text), 500) };
+  return { element, text };
 }
 
 /** Where a dragged area is now, in viewport pixels: it rides on its container. */

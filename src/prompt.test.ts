@@ -59,6 +59,16 @@ describe('buildPrompt', () => {
     expect(prompt).toContain('- **Section:** Khoản vay › Hồ sơ');
   });
 
+  it('claims redaction only for the comments that were screened', () => {
+    const note = 'Personal data has been replaced with `[redacted]`';
+    expect(buildPrompt([annotation], options)).toContain(`${note}; never treat it as a real value.`);
+    const raw = { ...annotation, redacted: false };
+    expect(buildPrompt([annotation, raw], options)).toContain(
+      `${note} (except in comment 2, recorded with redaction off); never treat it as a real value.`,
+    );
+    expect(buildPrompt([raw, raw], options)).not.toContain(note);
+  });
+
   it('writes one sub-section per element for a group, and names the container of an area', () => {
     const second: ElementCapture = { ...capture, element: { ...capture.element, text: 'Huỷ' } };
     const group = buildPrompt([{ ...annotation, kind: 'group', targets: [capture, second] }], options);

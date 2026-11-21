@@ -1,40 +1,9 @@
+import { DEFAULT_REDACTOR, REDACTED, type Redactor } from './redaction';
+
 /**
- * Turns live React props and state into a small JSON-safe value for the prompt, with
- * personal data removed. The prompt is pasted into an AI agent, so whatever this lets
- * through leaves the machine: a dev database can still hold a copy of real customer data.
- *
- * Two independent screens:
- * - by KEY: a property whose name says it holds personal data or a secret is replaced
- *   whole, whatever its value;
- * - by VALUE: inside every string, an e-mail address, a Vietnamese phone number or a
- *   12-digit citizen ID is replaced where it stands, so text that merely mentions one
- *   (an element's label, a free-text note) is screened too.
- *
- * Amounts survive on purpose: they are what a UI bug is usually about, and no money
- * figure starts with 0, which is what the phone and ID patterns require.
+ * Turns live React props and state into a small JSON-safe value for the prompt, screened
+ * for personal data by the given `Redactor` (see `redaction.ts`).
  */
-
-export const REDACTED = '[redacted]';
-
-/** Matched against the key lower-cased with `_`, `-` and spaces removed. */
-const PII_KEY =
-  /(nationalid|cccd|cmnd|citizenid|identitynumber|idnumber|idcard|passport|phone|mobile|msisdn|zalo|email|fullname|(debtor|borrower|customer|guarantor|contact|person|holder|relative|spouse|recipient|payer)name|address|dob|dateofbirth|birthday|birthdate|bankaccount|accountnumber|cardnumber|password|passwd|secret|token|otp|apikey|authorization|cookie|signature)/;
-
-const PII_VALUE: readonly RegExp[] = [
-  /[^\s@<>()[\]"']+@[^\s@<>()[\]"']+\.[a-z]{2,}/gi,
-  // +84 or 0, then 9–10 digits, optionally grouped by spaces or dots.
-  /(?<!\d)(?:\+?84|0)(?:[\s.]?\d){9,10}(?!\d)/g,
-  // CCCD: 12 digits, starting with the 0 of a province code.
-  /(?<!\d)0\d{11}(?!\d)/g,
-];
-
-export function isPiiKey(key: string): boolean {
-  return PII_KEY.test(key.toLowerCase().replace(/[\s_-]/g, ''));
-}
-
-export function redactText(text: string): string {
-  return PII_VALUE.reduce((out, pattern) => out.replace(pattern, REDACTED), text);
-}
 
 export interface SerializeLimits {
   /** Nesting levels below the root before an object collapses to a summary. */
@@ -56,11 +25,21 @@ const REACT_ELEMENT_TYPES = new Set([Symbol.for('react.transitional.element'), S
 
 export type Snapshot = null | boolean | number | string | readonly Snapshot[] | { readonly [key: string]: Snapshot };
 
-export function toSnapshot(value: unknown, limits: SerializeLimits = DEFAULT_LIMITS): Snapshot {
-  return walk(value, 0, limits, new Set());
+export function toSnapshot(
+  value: unknown,
+  limits: SerializeLimits = DEFAULT_LIMITS,
+  redactor: Redactor = DEFAULT_REDACTOR,
+): Snapshot {
+  return walk(value, 0, { limits, redactor }, new Set());
 }
 
-function walk(value: unknown, depth: number, limits: SerializeLimits, path: Set<object>): Snapshot {
+interface Walk {
+  readonly limits: SerializeLimits;
+  readonly redactor: Redactor;
+}
+
+function walk(value: unknown, depth: number, walker: Walk, path: Set<object>): Snapshot {
+  const { limits, redactor } = walker;
   switch (typeof value) {
     case 'undefined':
       return '<undefined>';
@@ -71,7 +50,7 @@ function walk(value: unknown, depth: number, limits: SerializeLimits, path: Set<
     case 'bigint':
       return `${value}n`;
     case 'string':
-      return truncate(redactText(value), limits.string);
+      return truncate(redactor.text(value), limits.string);
     case 'symbol':
       return value.toString();
     case 'function':
@@ -82,13 +61,13 @@ function walk(value: unknown, depth: number, limits: SerializeLimits, path: Set<
   if (value === null) return null;
   const object = value as object;
   if (path.has(object)) return '<circular>';
-  const summary = summarise(object);
+  const summary = summarise(object, redactor);
   if (summary !== null) return summary;
 
   path.add(object);
   try {
-    if (Array.isArray(object)) return walkList(object, object.length, depth, limits, path);
-    if (object instanceof Set) return { '<Set>': walkList([...object], object.size, depth, limits, path) };
+    if (Array.isArray(object)) return walkList(object, object.length, depth, walker, path);
+    if (object instanceof Set) return { '<Set>': walkList([...object], object.size, depth, walker, path) };
     if (object instanceof Map) {
       if (depth >= limits.depth) return `<Map(${object.size})>`;
       const entries: Record<string, Snapshot> = {};
@@ -98,13 +77,13 @@ function walk(value: unknown, depth: number, limits: SerializeLimits, path: Set<
           entries['…'] = `+${object.size - kept}`;
           break;
         }
-        const name = typeof key === 'string' ? key : String(walk(key, limits.depth, limits, path));
-        entries[name] = isPiiKey(name) ? redactWhole(entry) : walk(entry, depth + 1, limits, path);
+        const name = typeof key === 'string' ? key : String(walk(key, limits.depth, walker, path));
+        entries[name] = redactor.isPiiKey(name) ? redactWhole(entry) : walk(entry, depth + 1, walker, path);
         kept += 1;
       }
       return { '<Map>': entries };
     }
-    return walkObject(object as Record<string, unknown>, depth, limits, path);
+    return walkObject(object as Record<string, unknown>, depth, walker, path);
   } finally {
     path.delete(object);
   }
@@ -114,20 +93,22 @@ function walkList(
   items: readonly unknown[],
   size: number,
   depth: number,
-  limits: SerializeLimits,
+  walker: Walk,
   path: Set<object>,
 ): Snapshot {
+  const { limits } = walker;
   if (depth >= limits.depth) return `<Array(${size})>`;
-  const kept = items.slice(0, limits.items).map((item) => walk(item, depth + 1, limits, path));
+  const kept = items.slice(0, limits.items).map((item) => walk(item, depth + 1, walker, path));
   return size > limits.items ? [...kept, `… +${size - limits.items}`] : kept;
 }
 
 function walkObject(
   object: Record<string, unknown>,
   depth: number,
-  limits: SerializeLimits,
+  walker: Walk,
   path: Set<object>,
 ): Snapshot {
+  const { limits, redactor } = walker;
   const keys = Object.keys(object).filter((key) => !SKIPPED_KEYS.has(key) && !key.startsWith('__react'));
   if (depth >= limits.depth) return keys.length === 0 ? {} : `{…${keys.length} keys}`;
   const out: Record<string, Snapshot> = {};
@@ -139,7 +120,7 @@ function walkObject(
       out[key] = '<getter threw>';
       continue;
     }
-    out[key] = isPiiKey(key) ? redactWhole(entry) : walk(entry, depth + 1, limits, path);
+    out[key] = redactor.isPiiKey(key) ? redactWhole(entry) : walk(entry, depth + 1, walker, path);
   }
   if (keys.length > limits.keys) out['…'] = `+${keys.length - limits.keys} keys`;
   return out;
@@ -157,12 +138,12 @@ function redactWhole(value: unknown): Snapshot {
 }
 
 /** A one-line stand-in for values whose insides would only be noise, or `null` to walk it. */
-function summarise(object: object): string | null {
+function summarise(object: object, redactor: Redactor): string | null {
   if (REACT_ELEMENT_TYPES.has((object as { $$typeof?: symbol }).$$typeof as symbol)) {
     return `<${typeName((object as { type?: unknown }).type)} />`;
   }
   if (object instanceof Date) return Number.isNaN(object.getTime()) ? '<Invalid Date>' : object.toISOString();
-  if (object instanceof Error) return `<${object.name}: ${truncate(redactText(object.message), 120)}>`;
+  if (object instanceof Error) return `<${object.name}: ${truncate(redactor.text(object.message), 120)}>`;
   if (object instanceof RegExp) return object.toString();
   if (typeof Node !== 'undefined' && object instanceof Node) return `<${nodeLabel(object)}>`;
   if (typeof (object as { then?: unknown }).then === 'function') return '<Promise>';

@@ -1,4 +1,5 @@
-import { redactText, truncate } from './serialize';
+import { DEFAULT_REDACTOR, type Redactor } from './redaction';
+import { truncate } from './serialize';
 
 /**
  * What an element is to a user, and where on the page it sits, in words an agent can
@@ -73,15 +74,15 @@ function accessibleName(element: Element): string {
   return element.getAttribute('alt') ?? element.getAttribute('title') ?? visibleText(element);
 }
 
-function clean(text: string, max: number): string {
-  return truncate(redactText(text.replace(/\s+/g, ' ').trim()), max);
+function clean(text: string, max: number, redactor: Redactor): string {
+  return truncate(redactor.text(text.replace(/\s+/g, ' ').trim()), max);
 }
 
 /** `button "Save" (disabled, aria-expanded=false)`, or `null` for an element with no role. */
-export function describeAccessibility(element: Element): string | null {
+export function describeAccessibility(element: Element, redactor: Redactor = DEFAULT_REDACTOR): string | null {
   const role = roleOf(element);
   if (role === null) return null;
-  const name = clean(accessibleName(element), 80);
+  const name = clean(accessibleName(element), 80, redactor);
   const states: string[] = [];
   if ((element as HTMLButtonElement).disabled === true || element.getAttribute('aria-disabled') === 'true') {
     states.push('disabled');
@@ -110,15 +111,15 @@ function sectionLabel(section: Element): string | null {
  * The page heading, then the labels of up to three enclosing sections, outermost first:
  * `Debt batches › New batch › Source file`. `null` when nothing on the way up is labelled.
  */
-export function sectionPath(element: Element): string | null {
+export function sectionPath(element: Element, redactor: Redactor = DEFAULT_REDACTOR): string | null {
   const labels: string[] = [];
   for (let current = element.parentElement?.closest(SECTIONS) ?? null; current !== null && labels.length < MAX_SECTIONS; current = current.parentElement?.closest(SECTIONS) ?? null) {
     const label = sectionLabel(current);
-    if (label) labels.unshift(clean(label, 50));
+    if (label) labels.unshift(clean(label, 50, redactor));
   }
   const pageHeading = element.ownerDocument.querySelector('h1');
   if (pageHeading && !pageHeading.contains(element)) {
-    const heading = clean(visibleText(pageHeading), 50);
+    const heading = clean(visibleText(pageHeading), 50, redactor);
     if (heading && labels[0] !== heading) labels.unshift(heading);
   }
   const path = labels.filter((label) => label !== '');
@@ -126,10 +127,10 @@ export function sectionPath(element: Element): string | null {
 }
 
 /** The text just before and after the element, which tells two identical buttons apart. */
-export function nearbyText(element: Element): string | null {
+export function nearbyText(element: Element, redactor: Redactor = DEFAULT_REDACTOR): string | null {
   const before = visibleText(element.previousElementSibling);
   const after = visibleText(element.nextElementSibling);
-  const parts = [clean(before, 60), clean(after, 60)];
+  const parts = [clean(before, 60, redactor), clean(after, 60, redactor)];
   if (parts[0] === '' && parts[1] === '') return null;
   return `before: "${parts[0]}" · after: "${parts[1]}"`;
 }

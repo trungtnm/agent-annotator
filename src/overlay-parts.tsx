@@ -284,6 +284,8 @@ export interface ListEntry {
 export function Panel(props: {
   readonly entries: readonly ListEntry[];
   readonly includeData: boolean;
+  /** Whether new comments are screened for personal data, for the checkbox's label. */
+  readonly redactionOn: boolean;
   readonly onIncludeData: (value: boolean) => void;
   readonly onEdit: (id: string) => void;
   readonly onClear: () => void;
@@ -340,7 +342,7 @@ export function Panel(props: {
       <div style={{ padding: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
         <label style={{ ...FONT, display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: MUTED, cursor: 'pointer', flex: 1 }}>
           <input type="checkbox" checked={props.includeData} onChange={(event) => props.onIncludeData(event.target.checked)} />
-          Include props/state (personal data redacted)
+          Include props/state ({props.redactionOn ? 'personal data redacted' : 'redaction off'})
         </label>
         <button type="button" onClick={props.onClear} style={{ ...BUTTON, color: '#B42318' }}>
           Clear all
@@ -493,6 +495,10 @@ export interface ToolbarProps {
   /** Folded down to one button, out of the page's way. */
   readonly collapsed: boolean;
   readonly onToggleCollapsed: () => void;
+  /** Whether personal-data redaction is on: the settings button warns when it is off. */
+  readonly redactionOn: boolean;
+  readonly settingsOpen: boolean;
+  readonly onToggleSettings: () => void;
   /** Present while comment mode is on and its hint has been hidden: shows it again. */
   readonly onShowHint: (() => void) | null;
   readonly onToggleActive: () => void;
@@ -556,6 +562,17 @@ export function Toolbar(props: ToolbarProps): ReactNode {
         hint="Capture this tab with every comment shown, then mark it up"
         disabled={props.capturing}
         onClick={props.onScreenshot}
+      />
+      <ToolButton
+        icon={props.redactionOn ? 'shield' : 'shieldOff'}
+        label="Redaction settings"
+        hint={
+          props.redactionOn
+            ? 'Personal data is redacted from the prompt. Choose countries or add your own patterns.'
+            : 'Redaction is OFF: new comments carry personal data as the page shows it.'
+        }
+        pressed={props.settingsOpen}
+        onClick={props.onToggleSettings}
       />
       <Divider />
       <Tooltip

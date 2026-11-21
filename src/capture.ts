@@ -1,7 +1,8 @@
 import { describeAccessibility, nearbyText, sectionPath } from './context';
 import { componentAncestors, componentName, componentState, debugStackOf, fiberOf, type Fiber } from './fiber';
 import { cssSelector, controlValue, describeElement, elementText } from './selector';
-import { toSnapshot, type Snapshot } from './serialize';
+import { DEFAULT_REDACTOR, type Redactor } from './redaction';
+import { DEFAULT_LIMITS, toSnapshot, type Snapshot } from './serialize';
 import { callSiteFrame, type FrameResolver, type RawFrame, type SourceLocation } from './stack';
 
 /**
@@ -37,7 +38,7 @@ export interface ElementCapture {
   readonly jsx: SourceLocation | null;
   /** Enclosing components, nearest first, each with where IT was rendered from. */
   readonly components: ReadonlyArray<{ readonly name: string; readonly renderedAt: SourceLocation | null }>;
-  /** Props and stateful hooks of the nearest components, PII redacted. */
+  /** Props and stateful hooks of the nearest components, personal data redacted unless redaction is off. */
   readonly data: ReadonlyArray<{ readonly component: string; readonly props: Snapshot; readonly state: Snapshot }>;
 }
 
@@ -69,6 +70,8 @@ const DEFAULT_STYLE_VALUES = new Set(['none', 'normal', 'auto', '0px', 'rgba(0, 
 export interface CaptureOptions {
   /** Components whose props and state are snapshotted; further ones are only named. */
   readonly dataComponents?: number;
+  /** Screens text and data for personal data; the built-in defaults when left out. */
+  readonly redactor?: Redactor;
 }
 
 const DATA_COMPONENTS = 2;
@@ -81,6 +84,7 @@ export async function captureElement(
   options: CaptureOptions = {},
 ): Promise<ElementCapture> {
   const win = element.ownerDocument.defaultView ?? window;
+  const redactor = options.redactor ?? DEFAULT_REDACTOR;
   const fiber = fiberOf(element);
   const components = fiber === null ? [] : componentAncestors(fiber);
 
@@ -107,15 +111,15 @@ export async function captureElement(
     },
     element: {
       tag: element.tagName.toLowerCase(),
-      opening: describeElement(element),
+      opening: describeElement(element, redactor),
       selector: cssSelector(element),
-      text: elementText(element),
-      value: controlValue(element),
+      text: elementText(element, undefined, redactor),
+      value: controlValue(element, redactor),
       rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
       styles: notableStyles(win.getComputedStyle(element)),
-      accessibility: describeAccessibility(element),
-      section: sectionPath(element),
-      nearby: nearbyText(element),
+      accessibility: describeAccessibility(element, redactor),
+      section: sectionPath(element, redactor),
+      nearby: nearbyText(element, redactor),
     },
     viewport: { width: win.innerWidth, height: win.innerHeight, devicePixelRatio: win.devicePixelRatio },
     jsx: locate(sites[0]),
@@ -125,8 +129,8 @@ export async function captureElement(
     })),
     data: components.slice(0, options.dataComponents ?? DATA_COMPONENTS).map((component) => ({
       component: componentName(component),
-      props: toSnapshot(component.memoizedProps),
-      state: toSnapshot(componentState(component)),
+      props: toSnapshot(component.memoizedProps, DEFAULT_LIMITS, redactor),
+      state: toSnapshot(componentState(component), DEFAULT_LIMITS, redactor),
     })),
   };
 }
