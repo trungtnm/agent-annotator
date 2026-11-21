@@ -204,6 +204,28 @@ describe('DevAnnotator', () => {
     expect(await screen.findByRole('button', { name: 'Comment 1' })).toBeTruthy();
   });
 
+  it('keeps a pin to the page it was made on, even when its element stays mounted across pages', async () => {
+    const user = userEvent.setup();
+    const start = window.location.pathname;
+    render(
+      <>
+        <Counter />
+        <DevAnnotator appName="portal" resolveFrames={resolveFrames} />
+      </>,
+    );
+    await user.click(screen.getByRole('button', { name: /Turn on comment mode/ }));
+    await addComment(user, 'Đếm 0', 'A');
+    await screen.findByRole('button', { name: 'Comment 1' });
+
+    // Client-side navigation: the button is still in the document, the page is not the same.
+    window.history.pushState(null, '', '/elsewhere');
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Comment 1' })).toBeNull());
+    expect(screen.getByText(/other page/)).toBeTruthy();
+
+    window.history.pushState(null, '', start);
+    expect(await screen.findByRole('button', { name: 'Comment 1' })).toBeTruthy();
+  });
+
   it('says the prompt is ready to paste, and has no "open file" button', async () => {
     const user = userEvent.setup();
     vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();

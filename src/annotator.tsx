@@ -591,14 +591,16 @@ function liveArea(item: Item, container: Element): Rect | null {
 }
 
 /**
- * The first commented element if it is on screen now: the one clicked while it stays
- * mounted, else — after a reload or a navigation back — the selector's match on the same path.
+ * The first commented element if it is on screen now, and only on the page the comment
+ * was made on: the one clicked while it stays mounted, else — after a reload or a
+ * navigation back — the selector's match. An element that outlives the page (a layout's
+ * `<main>`, a shared header) must not carry the comment onto the next one.
  */
 function liveElement(item: Item): Element | null {
-  const [element] = item.elements;
-  if (element?.isConnected) return element;
   const first = item.annotation.targets[0];
   if (first === undefined || window.location.pathname !== first.page.pathname) return null;
+  const [element] = item.elements;
+  if (element?.isConnected) return element;
   try {
     return document.querySelector(first.element.selector);
   } catch {
