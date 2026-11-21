@@ -236,3 +236,25 @@ Work through the comments below one by one. Each names the selected element, whe
 }
 ```
 ````
+
+## Console prompt
+
+**Copy prompt → Console** writes the entries in the console list in the same shape:
+instructions first, then one section per entry. (With no comments, Copy prompt copies the
+console straight away.)
+
+| Field | What it tells the agent |
+|---|---|
+| **Logged by** | `console.error`, `console.warn`, uncaught exception, unhandled promise rejection, or a failed request (an error status, from Resource Timing; or an `<img>`, `<script>` or `<link>` that could not load). |
+| **Page** | The path the entry was logged on. |
+| **Seen** | Once, or how many times, with the first and last time. Identical messages on one page fold into one entry. |
+| **Source** | The nearest app frame of the stack (the thrown error's, else the console call's), mapped to the original source. Frames the dev server flags as framework code, and `node_modules`, are skipped. "No app frame in the stack" when none is left. |
+| **Called from** | Up to four app frames below it. |
+
+A failed request has no stack, so it has no **Source**: its message names the URL to search for.
+
+The message follows in a `text` block, format specifiers (`%s`, `%d`, `%o`…) filled in and
+`%c` styles dropped, with personal data replaced by `[redacted]` while redaction is on.
+Entries are kept in memory, up to the latest 200, and the list empties on a full reload.
+The console is wrapped, not replaced: every call still reaches DevTools and other wrappers.
+

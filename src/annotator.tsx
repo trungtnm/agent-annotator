@@ -1,10 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 
 import { captureElement, hoverLabel, type ElementCapture } from './capture';
 import { layoutCallouts, type CalloutTarget } from './callouts';
+import { clearConsole, consoleEntries, installConsoleCapture, subscribeConsole, type ConsoleEntry } from './console-capture';
+import { ConsolePanel } from './console-panel';
+import { buildConsolePrompt, locateEntries } from './console-prompt';
 import { AreaBox, boxOf, Callouts, Editor, Highlight, Hint, Panel, Pin, Toast, Toolbar, type ListEntry, type Notice } from './overlay-parts';
 import { RedactionPanel } from './redaction-panel';
 import { elementsInArea, OWN_SELECTOR, pauseMotion, type Rect } from './page-tools';
@@ -15,6 +18,7 @@ import { readFlag, writeFlag } from './flags';
 import { CaptureCancelled, captureTab, shotFileName, type ScreenCapture } from './screenshot';
 import { ScreenshotEditor } from './screenshot-editor';
 import { createNextResolver, type FrameResolver } from './stack';
+import { clampDock, DEFAULT_DOCK, opensBelow, panelAnchor, readDock, writeDock, type Dock, type Size } from './toolbar-dock';
 
 export interface DevAnnotatorProps {
   /** Names the app in the prompt and keys the saved comments (`web`, `admin`). */
@@ -73,6 +77,7 @@ const SHOW_COMMENTS_KEY = 'agent-annotator:show-comments';
 const COLLAPSED_KEY = 'agent-annotator:toolbar-collapsed';
 /** How long a notice stays up. */
 const NOTICE_MS = 5000;
+const NO_CONSOLE_ENTRIES: readonly ConsoleEntry[] = [];
 
 const KIND_LABEL: Readonly<Record<AnnotationKind, (count: number) => string>> = {
   element: () => '',
@@ -120,6 +125,38 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
   const [shot, setShot] = useState<{ readonly image: HTMLCanvasElement; readonly fileName: string } | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [, setFrame] = useState(0);
+  const [dock, setDock] = useState<Dock>(readDock);
+  const dockRef = useRef(dock);
+  const [toolbarNode, setToolbarNode] = useState<HTMLDivElement | null>(null);
+  const [toolbarSize, setToolbarSize] = useState<Size>({ width: 44, height: 44 });
+  const [viewport, setViewport] = useState<Size>(() => viewportSize());
+  // The toolbar's size changes with its buttons (a count appears) and when it folds.
+  useLayoutEffect(() => {
+    const node = toolbarNode;
+    if (node === null) return undefined;
+    const measure = (): void => {
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0) return;
+      setToolbarSize((current) =>
+        current.width === rect.width && current.height === rect.height ? current : { width: rect.width, height: rect.height },
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [toolbarNode]);
+  useEffect(() => {
+    const onResize = (): void => setViewport(viewportSize());
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  // Recording starts on the first render, ahead of effects, to catch the page's own first logs.
+  useState(installConsoleCapture);
+  const consoleLog = useSyncExternalStore(subscribeConsole, consoleEntries, () => NO_CONSOLE_ENTRIES);
+  const consoleErrors = consoleLog.filter((entry) => entry.level === 'error').length;
+  const [consoleOpen, setConsoleOpen] = useState(false);
 
   useEffect(() => {
     persist(
@@ -379,6 +416,17 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
     });
   };
 
+  const copyConsolePrompt = async (): Promise<void> => {
+    const chosen = consoleLog;
+    if (chosen.length === 0) return;
+    const locations = await locateEntries(chosen, resolveFrames);
+    await writeClipboard(buildConsolePrompt(chosen, locations, { appName, appDir, redactor, now: new Date() }));
+    setNotice({
+      title: 'Console prompt copied — ready for your coding agent',
+      detail: `${chosen.length === 1 ? 'The entry carries' : `Each of the ${chosen.length} entries carries`} its message and the nearest source line of its stack.`,
+    });
+  };
+
   const takeScreenshot = async (): Promise<void> => {
     setDraft(null);
     setPanelOpen(false);
@@ -426,6 +474,16 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
   const hideHint = (hidden: boolean): void => {
     setHintHidden(hidden);
     writeFlag(HINT_HIDDEN_KEY, hidden);
+  };
+
+  // Kept inside the viewport as it is now; the remembered place is left as the user put it.
+  const placedDock = clampDock(dock, toolbarSize, viewport);
+  const below = opensBelow(placedDock, toolbarSize, viewport);
+  const anchor = (width: number): ReturnType<typeof panelAnchor> => panelAnchor(placedDock, toolbarSize, viewport, width);
+  const moveDock = (next: Dock): void => {
+    const placed = clampDock(next, toolbarSize, viewport);
+    dockRef.current = placed;
+    setDock(placed);
   };
 
   const draftElement = draft?.elements[0];
@@ -508,9 +566,19 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
             writeRedaction(redactionKey, null);
           }}
           onClose={() => setSettingsOpen(false)}
+          anchor={anchor(340)}
         />
       ) : null}
-      {panelOpen && !settingsOpen && !collapsed && items.length > 0 ? (
+      {consoleOpen && !settingsOpen && !collapsed ? (
+        <ConsolePanel
+          entries={consoleLog}
+          onRemove={(id) => clearConsole(new Set([id]))}
+          onClear={() => clearConsole()}
+          onClose={() => setConsoleOpen(false)}
+          anchor={anchor(380)}
+        />
+      ) : null}
+      {panelOpen && !settingsOpen && !consoleOpen && !collapsed && items.length > 0 ? (
         <Panel
           entries={entries}
           includeData={includeData}
@@ -522,19 +590,40 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
             setItems([]);
           }}
           onClose={() => setPanelOpen(false)}
+          anchor={anchor(340)}
         />
       ) : null}
       <Toolbar
         active={active}
         paused={paused}
         count={items.length}
-        panelOpen={panelOpen}
+        panelOpen={panelOpen && !consoleOpen}
         showComments={showComments}
         capturing={capturing}
         collapsed={collapsed}
         redactionOn={redaction.enabled}
         settingsOpen={settingsOpen}
-        onToggleSettings={() => setSettingsOpen(!settingsOpen)}
+        onToggleSettings={() => {
+          setSettingsOpen(!settingsOpen);
+          setConsoleOpen(false);
+        }}
+        dock={placedDock}
+        placement={below ? 'below' : 'above'}
+        frame={setToolbarNode}
+        onDockMove={moveDock}
+        onDockDrop={() => writeDock(dockRef.current)}
+        onDockReset={() => {
+          dockRef.current = DEFAULT_DOCK;
+          setDock(DEFAULT_DOCK);
+          writeDock(null);
+        }}
+        consoleCount={consoleLog.length}
+        consoleErrors={consoleErrors}
+        consoleOpen={consoleOpen && !settingsOpen}
+        onToggleConsole={() => {
+          setConsoleOpen(!(consoleOpen && !settingsOpen));
+          setSettingsOpen(false);
+        }}
         onToggleCollapsed={() => {
           setCollapsed(!collapsed);
           writeFlag(COLLAPSED_KEY, !collapsed);
@@ -544,8 +633,11 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
         onTogglePaused={() => setPaused((value) => !value)}
         onToggleComments={toggleComments}
         onScreenshot={() => void takeScreenshot()}
-        onTogglePanel={() => setPanelOpen((value) => !value)}
-        onCopy={() => void copyPrompt()}
+        onTogglePanel={() => {
+          setPanelOpen(!(panelOpen && !consoleOpen));
+          setConsoleOpen(false);
+        }}
+        onCopy={(what) => void (what === 'console' ? copyConsolePrompt() : copyPrompt())}
       />
       {notice !== null ? <Toast notice={notice} onDismiss={() => setNotice(null)} /> : null}
       {shot !== null ? (
@@ -554,6 +646,10 @@ export function DevAnnotator(props: DevAnnotatorProps): ReactNode {
     </div>
   );
   return createPortal(overlay, document.body);
+}
+
+function viewportSize(): Size {
+  return typeof window === 'undefined' ? { width: 1280, height: 800 } : { width: window.innerWidth, height: window.innerHeight };
 }
 
 /** Inside an inline SVG icon, the icon is the thing being pointed at, not one of its paths. */

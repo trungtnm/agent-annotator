@@ -175,7 +175,7 @@ function dataJson(block: ElementCapture['data'][number]): string {
   return compact.length <= DATA_BLOCK_MAX ? compact : `${compact.slice(0, DATA_BLOCK_MAX)} … (truncated)`;
 }
 
-function location(source: SourceLocation, appDir: string | undefined): string {
+export function location(source: SourceLocation, appDir: string | undefined): string {
   const file = repoPath(source.file, appDir);
   const position = source.column === null ? `${source.line}` : `${source.line}:${source.column}`;
   return `\`${file}:${position}\`${source.mapped ? '' : ' (line in the bundled output, approximate)'}`;
@@ -205,7 +205,7 @@ function headline(comment: string): string {
   return first.length <= 70 ? first : `${first.slice(0, 70)}…`;
 }
 
-function formatTime(date: Date): string {
+export function formatTime(date: Date): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   return (
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +

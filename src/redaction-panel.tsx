@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
 import { ACCENT, BUTTON, FONT, LINE, MUTED, Z } from './overlay-parts';
 import { COUNTRIES, COUNTRY_RULES, compilePattern, type RedactionCountry, type RedactionSettings } from './redaction';
@@ -17,6 +17,8 @@ export function RedactionPanel(props: {
   readonly onChange: (settings: RedactionSettings) => void;
   readonly onReset: () => void;
   readonly onClose: () => void;
+  /** Where it opens, beside the toolbar. */
+  readonly anchor: CSSProperties;
 }): ReactNode {
   const { settings } = props;
   const off = !settings.enabled;
@@ -36,8 +38,7 @@ export function RedactionPanel(props: {
       style={{
         ...FONT,
         position: 'fixed',
-        right: 16,
-        bottom: 72,
+        ...props.anchor,
         width: 340,
         maxHeight: '70vh',
         overflowY: 'auto',

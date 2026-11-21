@@ -107,11 +107,18 @@ export function createNextResolver(fetchImpl: typeof fetch = (...args) => fetch(
   const cache = new Map<string, SourceLocation>();
   const keyOf = (frame: RawFrame): string => `${frame.file}:${frame.line1}:${frame.column1}`;
   const viaSourceMap = createSourceMapLookup(fetchImpl);
+  // Outside Next (Vite, CRA) the endpoint answers 404. Asked once: every request after
+  // would log another "Failed to load resource" in the page's console.
+  let nextEndpoint = true;
 
   return async (frames) => {
     const pending = frames.filter((frame) => !cache.has(keyOf(frame)));
     if (pending.length > 0) {
-      const fromNext = await requestOriginalFrames(fetchImpl, pending);
+      const fromNext = nextEndpoint
+        ? await requestOriginalFrames(fetchImpl, pending, () => {
+            nextEndpoint = false;
+          })
+        : pending.map(() => null);
       // Turbopack's endpoint cannot map a browser chunk URL; its `.map` beside the chunk can.
       const mapped = await Promise.all(
         pending.map(async (frame, index) => fromNext[index] ?? (await viaSourceMap(frame))),
@@ -125,6 +132,7 @@ export function createNextResolver(fetchImpl: typeof fetch = (...args) => fetch(
 async function requestOriginalFrames(
   fetchImpl: typeof fetch,
   frames: readonly RawFrame[],
+  onMissing: () => void,
 ): Promise<Array<SourceLocation | null>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -140,6 +148,7 @@ async function requestOriginalFrames(
       }),
       signal: controller.signal,
     });
+    if (response.status === 404) onMissing();
     if (!response.ok) return frames.map(() => null);
     const body: unknown = await response.json();
     if (!Array.isArray(body)) return frames.map(() => null);

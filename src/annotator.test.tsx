@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -356,7 +356,7 @@ describe('DevAnnotator', () => {
     await user.unhover(screen.getByRole('button', { name: 'Turn on comment mode' }));
     // Disabled while there is nothing to copy, and the tip says why.
     await user.hover(screen.getByRole('button', { name: 'Copy prompt' }));
-    expect((await screen.findByRole('tooltip')).textContent).toContain('Add a comment first.');
+    expect((await screen.findByRole('tooltip')).textContent).toContain('Add a comment first');
   });
 
   it('collapses the toolbar to one button that keeps the count, and remembers it', async () => {
@@ -381,5 +381,74 @@ describe('DevAnnotator', () => {
     await user.click(screen.getByRole('button', { name: 'Expand toolbar' }));
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeTruthy();
     expect(window.localStorage.getItem('agent-annotator:toolbar-collapsed')).toBeNull();
+  });
+
+  it('lists console errors and warnings, and Copy prompt asks whether to copy comments or console', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    render(
+      <>
+        <Counter />
+        <DevAnnotator appName="web" resolveFrames={resolveFrames} />
+      </>,
+    );
+    // Not silenced with a spy: the console is wrapped once per window, by the first test,
+    // and a spy would replace that wrapper. The two lines print to the test output.
+    act(() => {
+      console.error('Lỗi tải đơn hàng %s', '#42');
+      console.warn('Thiếu key cho danh sách');
+    });
+    await user.click(await screen.findByRole('button', { name: 'Console problems (2)' }));
+    const panel = screen.getByLabelText('Console problems');
+    expect(within(panel).getByText('Lỗi tải đơn hàng #42')).toBeTruthy();
+    expect(within(panel).queryByRole('button', { name: /Copy/ })).toBeNull();
+
+    // Removing an entry leaves it out of the prompt.
+    await user.click(within(panel).getByRole('button', { name: 'Remove: Thiếu key cho danh sách' }));
+
+    // Console only: Copy prompt copies it straight away.
+    await user.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const prompt = writeText.mock.calls[0]?.[0] ?? '';
+    expect(prompt).toContain('# Console problems: web (1 error)');
+    expect(prompt).toContain('## 1. Error: Lỗi tải đơn hàng #42');
+    expect(prompt).not.toContain('Thiếu key');
+
+    // With comments too, it asks.
+    await user.click(screen.getByRole('button', { name: /Turn on comment mode/ }));
+    await addComment(user, 'Đếm 0', 'Chữ đậm hơn');
+    await user.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await user.click(screen.getByRole('menuitem', { name: /Comments/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    expect(writeText.mock.calls[1]?.[0]).toContain('## 1. Chữ đậm hơn');
+    await user.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await user.click(screen.getByRole('menuitem', { name: /Console/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(3));
+    expect(writeText.mock.calls[2]?.[0]).toContain('# Console problems');
+
+    // The console list stayed open all along.
+    await user.click(within(screen.getByLabelText('Console problems')).getByRole('button', { name: 'Clear all' }));
+    expect(screen.getByRole('button', { name: 'Console problems (0)' })).toBeTruthy();
+  });
+
+  it('moves the toolbar by its grip and remembers where it was put', async () => {
+    const user = userEvent.setup();
+    render(<DevAnnotator appName="web" resolveFrames={resolveFrames} />);
+    const grip = screen.getByRole('button', { name: 'Move toolbar' });
+    fireEvent.pointerDown(grip, { button: 0, clientX: 500, clientY: 500 });
+    fireEvent.pointerMove(window, { clientX: 400, clientY: 450 });
+    fireEvent.pointerUp(window);
+    const toolbar = screen.getByRole('toolbar', { name: 'Dev annotator' });
+    expect(toolbar.style.right).toBe('116px');
+    expect(toolbar.style.bottom).toBe('66px');
+    expect(JSON.parse(window.localStorage.getItem('agent-annotator:toolbar-dock') ?? 'null')).toEqual({ right: 116, bottom: 66 });
+
+    grip.focus();
+    await user.keyboard('{ArrowLeft}');
+    expect(toolbar.style.right).toBe('132px');
+
+    await user.dblClick(grip);
+    expect(toolbar.style.right).toBe('16px');
+    expect(window.localStorage.getItem('agent-annotator:toolbar-dock')).toBeNull();
   });
 });

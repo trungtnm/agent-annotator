@@ -80,7 +80,8 @@ Start your dev server, press **Alt+Shift+C**, click something.
 ## A tour
 
 Everything lives in one toolbar, bottom right, which folds into a single button when you need the
-space:
+space. Drag it by its grip (or the folded button) anywhere on the screen; it stays there across
+reloads, and a double-click on the grip puts it back:
 
 <img src="docs/media/toolbar.png" alt="The toolbar: comment mode, pause, show comments, screenshot, redaction settings, list, copy prompt" width="430" />
 
@@ -129,7 +130,20 @@ the **JSX file:line**, the component chain with where each one is rendered, its 
 and props/state with personal data replaced by `[redacted]` ([redaction settings](docs/redaction.md)).
 [See a full prompt →](docs/prompt-format.md)
 
-### 6. Capture and mark up
+### 6. Hand console errors to your agent
+
+The **console** button counts the warnings and errors the page has logged: `console.error`,
+`console.warn`, uncaught exceptions, unhandled promise rejections and failed requests (the
+browser's own "Failed to load resource" lines: an error status, or an image or script that
+could not load), from every page you visit. Repeats fold into one entry with a count. Its
+list works like the comment list; remove what you do not want. When there are both comments
+and console entries, **Copy prompt** asks which to copy. The console prompt gives one section
+per entry: the message (personal data redacted), the page, how often it happened, and the
+nearest **app** source line of its stack, with framework and library frames left out.
+What extensions log from their own pages, and what was logged before the tool started, is out
+of the page's reach. [See the format →](docs/prompt-format.md#console-prompt)
+
+### 7. Capture and mark up
 
 <img src="docs/media/editor.png" alt="Screenshot editor with a callout, an arrow, a ruler and pixelated emails" width="860" />
 
@@ -146,6 +160,7 @@ grows to fit. Copy or save the PNG. [Editor guide →](docs/screenshot-editor.md
 | Click · select text · **⌘/Ctrl**+click · **Shift**+drag | Comment on an element · a passage · several elements · an area |
 | **Alt**+click | Use the page normally |
 | **⌘/Ctrl+Enter** · Esc | Save the comment · close the editor, then leave comment mode |
+| Arrow keys on the toolbar grip | Move the toolbar (**Shift** for bigger steps) |
 
 The screenshot editor has its own shortcuts (V A T R H P M C B, ⌘Z, ⌘C, ⌘S…): every button's
 tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them all.
@@ -182,6 +197,7 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 - Settings apply to comments made from then on, and the prompt names any comment recorded
   with redaction off.
 - Untick **Include props/state** to leave data out entirely, and pixelate screenshots before sharing.
+- Console messages are kept in memory only and screened when the console prompt is copied.
 - Nothing is uploaded. Comments live in `sessionStorage`; preferences in `localStorage`.
 
 ## FAQ

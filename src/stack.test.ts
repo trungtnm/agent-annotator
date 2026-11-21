@@ -67,4 +67,16 @@ describe('Next frame resolver', () => {
       { file: 'src/x.tsx', line: 40, column: 9, mapped: false },
     ]);
   });
+
+  it('stops asking the Next endpoint once it answers 404, so a non-Next app logs no more failed requests', async () => {
+    const calls: string[] = [];
+    const notNext = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response('', { status: 404 });
+    });
+    const resolve = createNextResolver(notNext as typeof fetch);
+    await resolve([frame]);
+    await resolve([{ ...frame, line1: 41 }]);
+    expect(calls.filter((url) => url.includes('__nextjs_original-stack-frames'))).toHaveLength(1);
+  });
 });
