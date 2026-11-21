@@ -1,7 +1,7 @@
 'use client';
 
 // src/annotator.tsx
-import { useCallback, useEffect as useEffect3, useMemo, useRef as useRef3, useState as useState3 } from "react";
+import { useCallback, useEffect as useEffect4, useLayoutEffect as useLayoutEffect3, useMemo, useRef as useRef4, useState as useState4, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 // src/redaction.ts
@@ -319,13 +319,13 @@ function describeAccessibility(element, redactor = DEFAULT_REDACTOR) {
 var SECTIONS = 'section, form, fieldset, dialog, [role="dialog"], table, article, aside, nav, [aria-label], [aria-labelledby]';
 var SECTION_TITLE = ":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > legend, :scope > caption, :scope > header h1, :scope > header h2, :scope > header h3, :scope > div > h1, :scope > div > h2, :scope > div > h3";
 var MAX_SECTIONS = 3;
-function sectionLabel(section2) {
-  const label = section2.getAttribute("aria-label");
+function sectionLabel(section3) {
+  const label = section3.getAttribute("aria-label");
   if (label) return label;
-  const labelledBy = section2.getAttribute("aria-labelledby");
-  if (labelledBy) return textOfIds(section2, labelledBy);
-  const title = section2.querySelector(SECTION_TITLE);
-  return title === null ? null : visibleText(title);
+  const labelledBy = section3.getAttribute("aria-labelledby");
+  if (labelledBy) return textOfIds(section3, labelledBy);
+  const title2 = section3.querySelector(SECTION_TITLE);
+  return title2 === null ? null : visibleText(title2);
 }
 function sectionPath(element, redactor = DEFAULT_REDACTOR) {
   const labels = [];
@@ -581,9 +581,9 @@ function originalPosition(map, line1, column1) {
   const column = column1 - 1;
   if (!("sections" in map)) return lookupPlain(map, line, column);
   let hit;
-  for (const section2 of map.sections) {
-    const { offset } = section2;
-    if (offset.line < line || offset.line === line && offset.column <= column) hit = section2;
+  for (const section3 of map.sections) {
+    const { offset } = section3;
+    if (offset.line < line || offset.line === line && offset.column <= column) hit = section3;
     else break;
   }
   if (hit === void 0) return null;
@@ -732,10 +732,13 @@ function createNextResolver(fetchImpl = (...args) => fetch(...args)) {
   const cache = /* @__PURE__ */ new Map();
   const keyOf = (frame) => `${frame.file}:${frame.line1}:${frame.column1}`;
   const viaSourceMap = createSourceMapLookup(fetchImpl);
+  let nextEndpoint = true;
   return async (frames) => {
     const pending = frames.filter((frame) => !cache.has(keyOf(frame)));
     if (pending.length > 0) {
-      const fromNext = await requestOriginalFrames(fetchImpl, pending);
+      const fromNext = nextEndpoint ? await requestOriginalFrames(fetchImpl, pending, () => {
+        nextEndpoint = false;
+      }) : pending.map(() => null);
       const mapped = await Promise.all(
         pending.map(async (frame, index) => fromNext[index] ?? await viaSourceMap(frame))
       );
@@ -744,7 +747,7 @@ function createNextResolver(fetchImpl = (...args) => fetch(...args)) {
     return frames.map((frame) => cache.get(keyOf(frame)) ?? unmapped(frame));
   };
 }
-async function requestOriginalFrames(fetchImpl, frames) {
+async function requestOriginalFrames(fetchImpl, frames, onMissing) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS2);
   try {
@@ -759,6 +762,7 @@ async function requestOriginalFrames(fetchImpl, frames) {
       }),
       signal: controller.signal
     });
+    if (response.status === 404) onMissing();
     if (!response.ok) return frames.map(() => null);
     const body = await response.json();
     if (!Array.isArray(body)) return frames.map(() => null);
@@ -913,6 +917,197 @@ function layoutCallouts(targets, viewport) {
   return placed.sort((a, b) => a.number - b.number);
 }
 
+// src/console-capture.ts
+var MAX_ENTRIES = 200;
+var MAX_MESSAGE = 8e3;
+var LOG_KEY = /* @__PURE__ */ Symbol.for("agent-annotator:console-log");
+function log() {
+  const holder = globalThis;
+  holder[LOG_KEY] ??= { entries: [], listeners: /* @__PURE__ */ new Set(), installed: false };
+  return holder[LOG_KEY];
+}
+function installConsoleCapture() {
+  const state = log();
+  if (state.installed || typeof window === "undefined") return;
+  state.installed = true;
+  let recording = false;
+  const record = (level, source, read) => {
+    if (recording) return;
+    recording = true;
+    try {
+      const { message, stack } = read();
+      add(state, level, source, message, stack);
+    } catch {
+    } finally {
+      recording = false;
+    }
+  };
+  const wrap = (method, level, source) => {
+    const original = console[method];
+    if (typeof original !== "function") return;
+    console[method] = function(...args) {
+      original.apply(this, args);
+      record(level, source, () => {
+        const error = args.find((arg) => arg instanceof Error);
+        const stack = error?.stack ?? new Error().stack?.split("\n").slice(2).join("\n") ?? null;
+        return { message: formatArgs(args), stack };
+      });
+    };
+  };
+  attempt(() => wrap("error", "error", "console.error"));
+  attempt(() => wrap("warn", "warning", "console.warn"));
+  attempt(
+    () => window.addEventListener("error", (event) => {
+      if (typeof ErrorEvent === "undefined" || !(event instanceof ErrorEvent)) return;
+      record("error", "uncaught", () => {
+        const error = event.error;
+        const where = event.filename ? `
+    at ${event.filename}:${event.lineno}:${event.colno}` : "";
+        return {
+          message: error instanceof Error ? describeError(error) : String(event.message),
+          stack: error instanceof Error && error.stack ? error.stack : where || null
+        };
+      });
+    })
+  );
+  attempt(
+    () => window.addEventListener("unhandledrejection", (event) => {
+      record("error", "rejection", () => {
+        const reason = event.reason;
+        return {
+          message: reason instanceof Error ? describeError(reason) : formatArgs([reason]),
+          stack: reason instanceof Error ? reason.stack ?? null : null
+        };
+      });
+    })
+  );
+  watchFailedRequests((read) => record("error", "network", () => ({ message: read(), stack: null })));
+}
+function attempt(step) {
+  try {
+    step();
+  } catch {
+  }
+}
+var OWN_REQUEST = /\/__nextjs_original-stack-frames|\.map(?:\?|$)/;
+function statusOf(url) {
+  try {
+    const entries = performance.getEntriesByName(url, "resource");
+    return entries[entries.length - 1]?.responseStatus;
+  } catch {
+    return void 0;
+  }
+}
+function watchFailedRequests(report) {
+  attempt(() => {
+    if (typeof PerformanceObserver === "undefined") return;
+    const supported = PerformanceObserver.supportedEntryTypes;
+    if (Array.isArray(supported) && !supported.includes("resource")) return;
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const status = entry.responseStatus;
+        if (typeof status !== "number" || status < 400 || OWN_REQUEST.test(entry.name)) continue;
+        report(() => `Failed to load resource: ${status} for ${entry.initiatorType} ${entry.name}`);
+      }
+    });
+    try {
+      observer.observe({ type: "resource", buffered: true });
+    } catch {
+      observer.observe({ entryTypes: ["resource"] });
+    }
+  });
+  attempt(
+    () => window.addEventListener(
+      "error",
+      (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement) || typeof ErrorEvent !== "undefined" && event instanceof ErrorEvent) return;
+        report(() => {
+          const url = target.getAttribute("src") === null ? target.href : target.src;
+          if (!url || OWN_REQUEST.test(url) || (statusOf(url) ?? 0) >= 400) throw new Skip();
+          return `Failed to load resource: <${target.tagName.toLowerCase()}> could not load ${url}`;
+        });
+      },
+      true
+    )
+  );
+}
+var Skip = class extends Error {
+};
+function add(state, level, source, message, stack) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const pathname = window.location.pathname;
+  const text = message.length <= MAX_MESSAGE ? message : `${message.slice(0, MAX_MESSAGE)}\u2026 (truncated)`;
+  const same = state.entries.find(
+    (entry) => entry.level === level && entry.message === text && entry.pathname === pathname
+  );
+  state.entries = same === void 0 ? [
+    ...state.entries,
+    { id: newId(), level, source, message: text, stack, pathname, count: 1, firstAt: now, lastAt: now }
+  ].slice(-MAX_ENTRIES) : state.entries.map((entry) => entry === same ? { ...entry, count: entry.count + 1, lastAt: now } : entry);
+  const notify = () => state.listeners.forEach((listener) => listener());
+  if (typeof queueMicrotask === "function") queueMicrotask(notify);
+  else void Promise.resolve().then(notify);
+}
+function consoleEntries() {
+  return log().entries;
+}
+function subscribeConsole(listener) {
+  const { listeners } = log();
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+function clearConsole(ids) {
+  const state = log();
+  state.entries = ids === void 0 ? [] : state.entries.filter((entry) => !ids.has(entry.id));
+  state.listeners.forEach((listener) => listener());
+}
+function formatArgs(args) {
+  const [first, ...rest] = args;
+  const queue = [...rest];
+  let head = "";
+  if (typeof first === "string") {
+    head = first.replace(/%([sdifoOjc%])/g, (match, spec) => {
+      if (spec === "%") return "%";
+      if (queue.length === 0) return match;
+      const value = queue.shift();
+      if (spec === "c") return "";
+      if (spec === "d" || spec === "i") return String(Number.parseInt(String(value), 10));
+      if (spec === "f") return String(Number.parseFloat(String(value)));
+      return show(value);
+    });
+  } else if (args.length > 0) {
+    queue.unshift(first);
+  }
+  return [head, ...queue.map(show)].filter((part) => part !== "").join(" ");
+}
+function show(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return describeError(value);
+  if (value === void 0 || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (typeof Element !== "undefined" && value instanceof Element) return `<${value.tagName.toLowerCase()}>`;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    try {
+      return String(value);
+    } catch {
+      return Object.prototype.toString.call(value);
+    }
+  }
+}
+function describeError(error) {
+  return error.message ? `${error.name}: ${error.message}` : error.name;
+}
+function newId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// src/overlay-parts.tsx
+import { useEffect as useEffect2, useRef as useRef2, useState as useState2 } from "react";
+
 // src/icons.tsx
 import { jsx } from "react/jsx-runtime";
 var PATHS = {
@@ -945,7 +1140,9 @@ var PATHS = {
   collapse: ["M9 6l6 6-6 6"],
   shield: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", "M9 12l2 2 4-4"],
   shieldOff: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", "M3 3l18 18"],
-  ruler: ["M3 17L17 3l4 4L7 21z", "M7 13l2 2", "M10 10l2 2", "M13 7l2 2"]
+  ruler: ["M3 17L17 3l4 4L7 21z", "M7 13l2 2", "M10 10l2 2", "M13 7l2 2"],
+  grip: ["M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"],
+  terminal: ["M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z", "M7 10l3 2-3 2", "M13 15h4"]
 };
 function Icon(props) {
   const size = props.size ?? 18;
@@ -984,7 +1181,7 @@ function Tooltip(props) {
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = null;
   };
-  const show = (delay) => {
+  const show2 = (delay) => {
     clear();
     timer.current = window.setTimeout(() => setOpen(true), delay);
   };
@@ -1005,11 +1202,11 @@ function Tooltip(props) {
     "span",
     {
       style: { position: "relative", display: "inline-flex" },
-      onPointerEnter: () => show(DELAY_MS),
+      onPointerEnter: () => show2(DELAY_MS),
       onPointerLeave: hide,
       onPointerDown: hide,
       onFocus: (event) => {
-        if (focusVisible(event.target)) show(0);
+        if (focusVisible(event.target)) show2(0);
       },
       onBlur: hide,
       children: [
@@ -1322,8 +1519,7 @@ function Panel(props) {
       style: {
         ...FONT2,
         position: "fixed",
-        right: 16,
-        bottom: 72,
+        ...props.anchor,
         width: 340,
         maxHeight: "60vh",
         display: "flex",
@@ -1501,19 +1697,23 @@ function Toast(props) {
     }
   );
 }
-function Toolbar(props) {
+function Toolbar({ frame, ...props }) {
   const none = props.count === 0;
-  if (props.collapsed) return /* @__PURE__ */ jsx3(CollapsedToolbar, { ...props });
+  const nothingToCopy = none && props.consoleCount === 0;
+  const [copyMenu, setCopyMenu] = useState2(false);
+  const drag = useDockDrag(props.dock, props.onDockMove, props.onDockDrop);
+  if (props.collapsed) return /* @__PURE__ */ jsx3(CollapsedToolbar, { ...props, frame });
   return /* @__PURE__ */ jsxs2(
     "div",
     {
+      ref: frame,
       role: "toolbar",
       "aria-label": "Dev annotator",
       style: {
         ...FONT2,
         position: "fixed",
-        right: 16,
-        bottom: 16,
+        right: props.dock.right,
+        bottom: props.dock.bottom,
         display: "flex",
         alignItems: "center",
         gap: 2,
@@ -1524,6 +1724,32 @@ function Toolbar(props) {
         zIndex: Z + 2
       },
       children: [
+        /* @__PURE__ */ jsx3(Tooltip, { label: "Move toolbar", detail: "Drag it anywhere, or use the arrow keys. Double-click to put it back.", placement: props.placement, children: (describedBy) => /* @__PURE__ */ jsx3(
+          "button",
+          {
+            type: "button",
+            "aria-label": "Move toolbar",
+            "aria-describedby": describedBy,
+            onPointerDown: drag.onPointerDown,
+            onDoubleClick: props.onDockReset,
+            onKeyDown: (event) => {
+              const step = event.shiftKey ? 64 : 16;
+              const delta = {
+                ArrowLeft: [step, 0],
+                ArrowRight: [-step, 0],
+                ArrowUp: [0, step],
+                ArrowDown: [0, -step]
+              };
+              const move = delta[event.key];
+              if (move === void 0) return;
+              event.preventDefault();
+              props.onDockMove({ right: props.dock.right + move[0], bottom: props.dock.bottom + move[1] });
+              props.onDockDrop();
+            },
+            style: { ...barButton(false, false, false), minWidth: 20, width: 20, cursor: "grab", touchAction: "none", opacity: 0.6 },
+            children: /* @__PURE__ */ jsx3(Icon, { name: "grip", size: 16 })
+          }
+        ) }),
         /* @__PURE__ */ jsx3(
           ToolButton,
           {
@@ -1533,7 +1759,8 @@ function Toolbar(props) {
             shortcut: props.active ? "Esc" : "Alt+Shift+C",
             pressed: props.active,
             accent: true,
-            onClick: props.onToggleActive
+            onClick: props.onToggleActive,
+            placement: props.placement
           }
         ),
         /* @__PURE__ */ jsx3(
@@ -1543,7 +1770,8 @@ function Toolbar(props) {
             label: props.paused ? "Resume animations" : "Pause animations",
             hint: props.paused ? "Resume animations and videos" : "Pause animations and videos to comment on the current frame",
             pressed: props.paused,
-            onClick: props.onTogglePaused
+            onClick: props.onTogglePaused,
+            placement: props.placement
           }
         ),
         /* @__PURE__ */ jsx3(
@@ -1554,7 +1782,8 @@ function Toolbar(props) {
             hint: props.showComments ? "Collapse comments back to numbered pins" : "Show every comment beside its element",
             pressed: props.showComments,
             disabled: none,
-            onClick: props.onToggleComments
+            onClick: props.onToggleComments,
+            placement: props.placement
           }
         ),
         /* @__PURE__ */ jsx3(
@@ -1564,7 +1793,8 @@ function Toolbar(props) {
             label: "Screenshot",
             hint: "Capture this tab with every comment shown, then mark it up",
             disabled: props.capturing,
-            onClick: props.onScreenshot
+            onClick: props.onScreenshot,
+            placement: props.placement
           }
         ),
         /* @__PURE__ */ jsx3(
@@ -1574,7 +1804,50 @@ function Toolbar(props) {
             label: "Redaction settings",
             hint: props.redactionOn ? "Personal data is redacted from the prompt. Choose countries or add your own patterns." : "Redaction is OFF: new comments carry personal data as the page shows it.",
             pressed: props.settingsOpen,
-            onClick: props.onToggleSettings
+            onClick: props.onToggleSettings,
+            placement: props.placement
+          }
+        ),
+        /* @__PURE__ */ jsx3(
+          Tooltip,
+          {
+            label: props.consoleOpen ? "Hide console problems" : "Console problems",
+            detail: props.consoleCount === 0 ? "No warnings or errors logged yet." : `${props.consoleErrors} error${props.consoleErrors === 1 ? "" : "s"}, ${props.consoleCount - props.consoleErrors} warning${props.consoleCount - props.consoleErrors === 1 ? "" : "s"} from the browser console. Pick some and copy them as a prompt.`,
+            placement: props.placement,
+            children: (describedBy) => /* @__PURE__ */ jsxs2(
+              "button",
+              {
+                type: "button",
+                onClick: props.onToggleConsole,
+                "aria-pressed": props.consoleOpen,
+                "aria-label": `Console problems (${props.consoleCount})`,
+                "aria-describedby": describedBy,
+                style: { ...barButton(props.consoleOpen, false, false), gap: 4, padding: props.consoleCount === 0 ? 0 : "0 8px" },
+                children: [
+                  /* @__PURE__ */ jsx3(Icon, { name: "terminal" }),
+                  props.consoleCount === 0 ? null : /* @__PURE__ */ jsx3(
+                    "span",
+                    {
+                      style: {
+                        ...FONT2,
+                        minWidth: 18,
+                        height: 18,
+                        padding: "0 5px",
+                        borderRadius: 9,
+                        background: props.consoleErrors > 0 ? "#D92D20" : "#DC6803",
+                        color: "#FFFFFF",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        lineHeight: "18px",
+                        textAlign: "center",
+                        boxSizing: "border-box"
+                      },
+                      children: props.consoleCount
+                    }
+                  )
+                ]
+              }
+            )
           }
         ),
         /* @__PURE__ */ jsx3(Divider, {}),
@@ -1583,7 +1856,7 @@ function Toolbar(props) {
           {
             label: props.panelOpen && !none ? "Hide comment list" : "Comment list",
             detail: none ? "No comments yet." : "Every comment, on this page and others; click one to edit it.",
-            placement: "above",
+            placement: props.placement,
             children: (describedBy) => /* @__PURE__ */ jsxs2(
               "button",
               {
@@ -1602,94 +1875,235 @@ function Toolbar(props) {
             )
           }
         ),
-        /* @__PURE__ */ jsx3(
-          Tooltip,
-          {
-            label: "Copy prompt",
-            detail: none ? "Add a comment first." : "Every comment as one Markdown prompt for your coding agent.",
-            placement: "above",
-            children: (describedBy) => /* @__PURE__ */ jsxs2(
-              "button",
-              {
-                type: "button",
-                onClick: props.onCopy,
-                disabled: none,
-                "aria-describedby": describedBy,
-                style: {
-                  ...barButton(false, false, none),
-                  gap: 6,
-                  padding: "0 12px",
-                  background: none ? "transparent" : ACCENT,
-                  color: "#FFFFFF"
-                },
-                children: [
-                  /* @__PURE__ */ jsx3(Icon, { name: "copy", size: 16 }),
-                  /* @__PURE__ */ jsx3("span", { style: { ...FONT2, color: "inherit", fontWeight: 600 }, children: "Copy prompt" })
-                ]
-              }
-            )
-          }
-        ),
+        /* @__PURE__ */ jsxs2("span", { style: { position: "relative", display: "inline-flex" }, children: [
+          /* @__PURE__ */ jsx3(
+            Tooltip,
+            {
+              label: "Copy prompt",
+              detail: nothingToCopy ? "Add a comment first, or wait for a console warning or error." : none ? "The console's warnings and errors as one Markdown prompt for your coding agent." : props.consoleCount === 0 ? "Every comment as one Markdown prompt for your coding agent." : "Choose: every comment, or the console's warnings and errors, as one Markdown prompt.",
+              placement: props.placement,
+              children: (describedBy) => /* @__PURE__ */ jsxs2(
+                "button",
+                {
+                  type: "button",
+                  onClick: () => {
+                    if (props.consoleCount === 0) props.onCopy("comments");
+                    else if (none) props.onCopy("console");
+                    else setCopyMenu(!copyMenu);
+                  },
+                  disabled: nothingToCopy,
+                  "aria-haspopup": !none && props.consoleCount > 0 ? "menu" : void 0,
+                  "aria-expanded": !none && props.consoleCount > 0 ? copyMenu : void 0,
+                  "aria-describedby": describedBy,
+                  style: {
+                    ...barButton(false, false, nothingToCopy),
+                    gap: 6,
+                    padding: "0 12px",
+                    background: nothingToCopy ? "transparent" : ACCENT,
+                    color: "#FFFFFF"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsx3(Icon, { name: "copy", size: 16 }),
+                    /* @__PURE__ */ jsx3("span", { style: { ...FONT2, color: "inherit", fontWeight: 600 }, children: "Copy prompt" })
+                  ]
+                }
+              )
+            }
+          ),
+          copyMenu && !none && props.consoleCount > 0 ? /* @__PURE__ */ jsx3(
+            CopyMenu,
+            {
+              comments: props.count,
+              console: props.consoleCount,
+              placement: props.placement,
+              onPick: (what) => {
+                setCopyMenu(false);
+                props.onCopy(what);
+              },
+              onClose: () => setCopyMenu(false)
+            }
+          ) : null
+        ] }),
         props.onShowHint === null ? null : /* @__PURE__ */ jsxs2(Fragment, { children: [
           /* @__PURE__ */ jsx3(Divider, {}),
-          /* @__PURE__ */ jsx3(ToolButton, { icon: "help", label: "Show hint", hint: "Show the comment-mode shortcuts", onClick: props.onShowHint })
+          /* @__PURE__ */ jsx3(ToolButton, { icon: "help", label: "Show hint", hint: "Show the comment-mode shortcuts", placement: props.placement, onClick: props.onShowHint })
         ] }),
         /* @__PURE__ */ jsx3(Divider, {}),
-        /* @__PURE__ */ jsx3(ToolButton, { icon: "collapse", label: "Collapse toolbar", hint: "Fold the toolbar into one button. Alt+Shift+C still works.", onClick: props.onToggleCollapsed })
-      ]
-    }
-  );
-}
-function CollapsedToolbar(props) {
-  const detail = [
-    props.count === 0 ? "No comments yet." : `${props.count} comment${props.count === 1 ? "" : "s"}.`,
-    props.active ? "Comment mode is on." : null
-  ].filter(Boolean).join(" ");
-  return /* @__PURE__ */ jsx3("div", { role: "toolbar", "aria-label": "Dev annotator", style: { position: "fixed", right: 16, bottom: 16, zIndex: Z + 2 }, children: /* @__PURE__ */ jsx3(Tooltip, { label: "Expand toolbar", detail, placement: "above", children: (describedBy) => /* @__PURE__ */ jsxs2(
-    "button",
-    {
-      type: "button",
-      onClick: props.onToggleCollapsed,
-      "aria-label": "Expand toolbar",
-      "aria-describedby": describedBy,
-      style: {
-        ...barButton(false, false, false),
-        position: "relative",
-        width: 44,
-        height: 44,
-        borderRadius: 22,
-        background: INK,
-        boxShadow: props.active ? `0 0 0 2px ${ACCENT}, 0 6px 20px rgba(0,0,0,0.28)` : "0 6px 20px rgba(0,0,0,0.28)"
-      },
-      children: [
-        /* @__PURE__ */ jsx3(Icon, { name: "comment" }),
-        props.count === 0 ? null : /* @__PURE__ */ jsx3(
-          "span",
+        /* @__PURE__ */ jsx3(
+          ToolButton,
           {
-            "aria-hidden": "true",
-            style: {
-              ...FONT2,
-              position: "absolute",
-              top: -4,
-              right: -4,
-              minWidth: 18,
-              height: 18,
-              padding: "0 5px",
-              borderRadius: 9,
-              background: ACCENT,
-              color: "#FFFFFF",
-              fontSize: 11,
-              fontWeight: 700,
-              lineHeight: "18px",
-              textAlign: "center",
-              boxSizing: "border-box"
-            },
-            children: props.count
+            icon: "collapse",
+            label: "Collapse toolbar",
+            hint: "Fold the toolbar into one button. Alt+Shift+C still works.",
+            placement: props.placement,
+            onClick: props.onToggleCollapsed
           }
         )
       ]
     }
-  ) }) });
+  );
+}
+function CollapsedToolbar({ frame, ...props }) {
+  const drag = useDockDrag(props.dock, props.onDockMove, props.onDockDrop);
+  const detail = [
+    props.count === 0 ? "No comments yet." : `${props.count} comment${props.count === 1 ? "" : "s"}.`,
+    props.active ? "Comment mode is on." : null
+  ].filter(Boolean).join(" ");
+  return /* @__PURE__ */ jsx3(
+    "div",
+    {
+      ref: frame,
+      role: "toolbar",
+      "aria-label": "Dev annotator",
+      style: { position: "fixed", right: props.dock.right, bottom: props.dock.bottom, zIndex: Z + 2 },
+      children: /* @__PURE__ */ jsx3(Tooltip, { label: "Expand toolbar", detail: `${detail} Drag to move it.`.trim(), placement: props.placement, children: (describedBy) => /* @__PURE__ */ jsxs2(
+        "button",
+        {
+          type: "button",
+          onPointerDown: drag.onPointerDown,
+          onClickCapture: drag.onClickCapture,
+          onClick: props.onToggleCollapsed,
+          "aria-label": "Expand toolbar",
+          "aria-describedby": describedBy,
+          style: {
+            ...barButton(false, false, false),
+            position: "relative",
+            width: 44,
+            height: 44,
+            borderRadius: 22,
+            background: INK,
+            boxShadow: props.active ? `0 0 0 2px ${ACCENT}, 0 6px 20px rgba(0,0,0,0.28)` : "0 6px 20px rgba(0,0,0,0.28)"
+          },
+          children: [
+            /* @__PURE__ */ jsx3(Icon, { name: "comment" }),
+            props.count === 0 ? null : /* @__PURE__ */ jsx3(
+              "span",
+              {
+                "aria-hidden": "true",
+                style: {
+                  ...FONT2,
+                  position: "absolute",
+                  top: -4,
+                  right: -4,
+                  minWidth: 18,
+                  height: 18,
+                  padding: "0 5px",
+                  borderRadius: 9,
+                  background: ACCENT,
+                  color: "#FFFFFF",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  lineHeight: "18px",
+                  textAlign: "center",
+                  boxSizing: "border-box"
+                },
+                children: props.count
+              }
+            )
+          ]
+        }
+      ) })
+    }
+  );
+}
+function CopyMenu(props) {
+  const item = {
+    ...FONT2,
+    appearance: "none",
+    display: "flex",
+    gap: 12,
+    justifyContent: "space-between",
+    width: "100%",
+    padding: "7px 10px",
+    border: 0,
+    borderRadius: 6,
+    background: "transparent",
+    textAlign: "left",
+    cursor: "pointer",
+    whiteSpace: "nowrap"
+  };
+  const menu = useRef2(null);
+  const { onClose } = props;
+  useEffect2(() => {
+    const onPointerDown = (event) => {
+      const holder = menu.current?.parentElement;
+      if (event.target instanceof Node && holder?.contains(event.target)) return;
+      onClose();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+  }, [onClose]);
+  return /* @__PURE__ */ jsxs2(
+    "div",
+    {
+      ref: menu,
+      role: "menu",
+      "aria-label": "Copy prompt",
+      onKeyDown: (event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          props.onClose();
+        }
+      },
+      style: {
+        ...FONT2,
+        position: "absolute",
+        right: 0,
+        ...props.placement === "above" ? { bottom: "calc(100% + 10px)" } : { top: "calc(100% + 10px)" },
+        minWidth: 190,
+        padding: 4,
+        background: "#FFFFFF",
+        border: `1px solid ${LINE}`,
+        borderRadius: 8,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+        zIndex: Z + 3
+      },
+      children: [
+        /* @__PURE__ */ jsxs2("button", { type: "button", role: "menuitem", autoFocus: true, onClick: () => props.onPick("comments"), style: item, children: [
+          /* @__PURE__ */ jsx3("span", { style: { ...FONT2, fontWeight: 600 }, children: "Comments" }),
+          /* @__PURE__ */ jsx3("span", { style: { ...FONT2, color: MUTED }, children: props.comments })
+        ] }),
+        /* @__PURE__ */ jsxs2("button", { type: "button", role: "menuitem", onClick: () => props.onPick("console"), style: item, children: [
+          /* @__PURE__ */ jsx3("span", { style: { ...FONT2, fontWeight: 600 }, children: "Console" }),
+          /* @__PURE__ */ jsx3("span", { style: { ...FONT2, color: MUTED }, children: props.console })
+        ] })
+      ]
+    }
+  );
+}
+var DRAG_THRESHOLD = 4;
+function useDockDrag(dock, onDockMove, onDockDrop) {
+  const moved = useRef2(false);
+  return {
+    onClickCapture: (event) => {
+      if (!moved.current) return;
+      moved.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    onPointerDown: (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const start = { x: event.clientX, y: event.clientY };
+      moved.current = false;
+      const onMove = (move) => {
+        const dx = move.clientX - start.x;
+        const dy = move.clientY - start.y;
+        if (!moved.current && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        moved.current = true;
+        onDockMove({ right: dock.right - dx, bottom: dock.bottom - dy });
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        if (moved.current) onDockDrop();
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    }
+  };
 }
 function Divider() {
   return /* @__PURE__ */ jsx3("span", { "aria-hidden": "true", style: { width: 1, height: 20, margin: "0 4px", background: "rgba(255,255,255,0.18)" } });
@@ -1719,7 +2133,7 @@ function ToolButton(props) {
       label: props.label,
       ...props.hint === void 0 ? {} : { detail: props.hint },
       ...props.shortcut === void 0 ? {} : { shortcut: keyCaps(props.shortcut) },
-      placement: "above",
+      placement: props.placement,
       children: (describedBy) => /* @__PURE__ */ jsx3(
         "button",
         {
@@ -1743,32 +2157,23 @@ function keyCaps(shortcut) {
   return shortcut.split("+").map((key) => names[key] ?? key);
 }
 
-// src/redaction-panel.tsx
+// src/console-panel.tsx
 import { jsx as jsx4, jsxs as jsxs3 } from "react/jsx-runtime";
-var LABEL = { ...FONT2, display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" };
-function RedactionPanel(props) {
-  const { settings } = props;
-  const off = !settings.enabled;
-  const update = (patch) => props.onChange({ ...settings, ...patch });
-  const toggleCountry = (country, on) => update({ countries: COUNTRIES.filter((each) => each === country ? on : settings.countries.includes(each)) });
-  const errors = settings.patterns.flatMap((source, index) => {
-    if (source.trim() === "") return [];
-    const compiled = compilePattern(source);
-    return typeof compiled === "string" ? [`Line ${index + 1}: ${compiled}`] : [];
-  });
+var ERROR = "#B42318";
+var WARNING = "#B54708";
+function ConsolePanel(props) {
   return /* @__PURE__ */ jsxs3(
     "div",
     {
-      role: "dialog",
-      "aria-label": "Redaction settings",
+      "aria-label": "Console problems",
       style: {
         ...FONT2,
         position: "fixed",
-        right: 16,
-        bottom: 72,
+        ...props.anchor,
         width: 340,
-        maxHeight: "70vh",
-        overflowY: "auto",
+        maxHeight: "60vh",
+        display: "flex",
+        flexDirection: "column",
         background: "#FFFFFF",
         border: `1px solid ${LINE}`,
         borderRadius: 10,
@@ -1778,153 +2183,65 @@ function RedactionPanel(props) {
       },
       children: [
         /* @__PURE__ */ jsxs3("div", { style: { display: "flex", alignItems: "center", padding: "8px 10px", borderBottom: `1px solid ${LINE}` }, children: [
-          /* @__PURE__ */ jsx4("strong", { style: { ...FONT2, fontWeight: 600 }, children: "Personal data redaction" }),
-          /* @__PURE__ */ jsx4("button", { type: "button", onClick: props.onClose, "aria-label": "Close redaction settings", style: { ...BUTTON, marginLeft: "auto", padding: "2px 8px" }, children: "Close" })
+          /* @__PURE__ */ jsxs3("strong", { style: { ...FONT2, fontWeight: 600 }, children: [
+            "Console (",
+            props.entries.length,
+            ")"
+          ] }),
+          /* @__PURE__ */ jsx4("button", { type: "button", onClick: props.onClose, "aria-label": "Hide console", style: { ...BUTTON, marginLeft: "auto", padding: "2px 8px" }, children: "Hide" })
         ] }),
-        /* @__PURE__ */ jsxs3("div", { style: { ...FONT2, padding: 10, display: "flex", flexDirection: "column", gap: 12 }, children: [
-          /* @__PURE__ */ jsxs3("label", { style: { ...LABEL, alignItems: "center" }, children: [
-            /* @__PURE__ */ jsx4(
-              "input",
+        props.entries.length === 0 ? /* @__PURE__ */ jsx4("p", { style: { ...FONT2, margin: 0, padding: "14px 10px", color: MUTED }, children: "No warnings or errors logged yet. They are recorded as they happen, on every page." }) : /* @__PURE__ */ jsx4("ol", { style: { ...FONT2, listStyle: "none", margin: 0, padding: 0, overflowY: "auto", flex: 1 }, children: props.entries.map((entry) => /* @__PURE__ */ jsxs3("li", { style: { ...FONT2, display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 10px", borderBottom: `1px solid ${LINE}` }, children: [
+          /* @__PURE__ */ jsxs3("span", { style: { ...FONT2, flex: 1, minWidth: 0 }, children: [
+            /* @__PURE__ */ jsxs3(
+              "span",
               {
-                type: "checkbox",
-                role: "switch",
-                checked: settings.enabled,
-                "aria-checked": settings.enabled,
-                onChange: (event) => update({ enabled: event.target.checked })
+                title: entry.message,
+                style: { ...FONT2, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                children: [
+                  /* @__PURE__ */ jsx4("span", { style: { ...FONT2, color: entry.level === "error" ? ERROR : WARNING, fontWeight: 700 }, children: entry.level === "error" ? "Error" : "Warning" }),
+                  " ",
+                  firstLine(entry.message)
+                ]
               }
             ),
-            /* @__PURE__ */ jsx4("span", { style: { ...FONT2, fontWeight: 600 }, children: "Redact personal data" })
+            /* @__PURE__ */ jsxs3("span", { style: { ...FONT2, display: "block", fontSize: 11, color: MUTED, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: [
+              entry.pathname,
+              " \xB7 ",
+              entry.source,
+              entry.count > 1 ? ` \xB7 \xD7${entry.count}` : ""
+            ] })
           ] }),
-          /* @__PURE__ */ jsx4("p", { style: { ...FONT2, margin: 0, fontSize: 12, color: off ? "#B42318" : MUTED }, children: off ? "Off: new comments carry props, state and page text exactly as the page shows them. Password fields stay hidden." : "Values under keys like phone, email, name, address, ID, password or token, and every e-mail address, become [redacted]." }),
-          /* @__PURE__ */ jsxs3("fieldset", { disabled: off, style: { ...FONT2, margin: 0, padding: 0, border: 0, opacity: off ? 0.5 : 1 }, children: [
-            /* @__PURE__ */ jsx4("legend", { style: { ...FONT2, padding: 0, marginBottom: 6, fontWeight: 600 }, children: "Number formats" }),
-            /* @__PURE__ */ jsx4("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: COUNTRIES.map((country) => /* @__PURE__ */ jsxs3("label", { style: LABEL, children: [
-              /* @__PURE__ */ jsx4(
-                "input",
-                {
-                  type: "checkbox",
-                  checked: settings.countries.includes(country),
-                  onChange: (event) => toggleCountry(country, event.target.checked),
-                  style: { marginTop: 3 }
-                }
-              ),
-              /* @__PURE__ */ jsxs3("span", { style: FONT2, children: [
-                COUNTRY_RULES[country].label,
-                /* @__PURE__ */ jsx4("span", { style: { ...FONT2, display: "block", fontSize: 11, color: MUTED }, children: COUNTRY_RULES[country].covers })
-              ] })
-            ] }, country)) })
-          ] }),
-          /* @__PURE__ */ jsxs3("fieldset", { disabled: off, style: { ...FONT2, margin: 0, padding: 0, border: 0, opacity: off ? 0.5 : 1 }, children: [
-            /* @__PURE__ */ jsx4("legend", { style: { ...FONT2, padding: 0, marginBottom: 4, fontWeight: 600 }, children: "Your own patterns" }),
-            /* @__PURE__ */ jsxs3("label", { htmlFor: "agent-annotator-patterns", style: { ...FONT2, display: "block", fontSize: 11, color: MUTED, marginBottom: 4 }, children: [
-              "One regular expression per line, e.g. ",
-              /* @__PURE__ */ jsxs3("code", { children: [
-                "INV-\\d",
-                "{6}"
-              ] }),
-              " or ",
-              /* @__PURE__ */ jsx4("code", { children: "/acct[0-9]+/i" }),
-              "."
-            ] }),
-            /* @__PURE__ */ jsx4(
-              "textarea",
-              {
-                id: "agent-annotator-patterns",
-                value: settings.patterns.join("\n"),
-                onChange: (event) => update({ patterns: event.target.value === "" ? [] : event.target.value.split("\n") }),
-                rows: 3,
-                spellCheck: false,
-                "aria-invalid": errors.length > 0,
-                style: {
-                  ...FONT2,
-                  width: "100%",
-                  boxSizing: "border-box",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                  fontSize: 12,
-                  padding: 6,
-                  border: `1px solid ${errors.length > 0 ? "#B42318" : LINE}`,
-                  borderRadius: 6,
-                  resize: "vertical"
-                }
-              }
-            ),
-            errors.length > 0 ? /* @__PURE__ */ jsx4("ul", { role: "alert", style: { ...FONT2, margin: "4px 0 0", paddingLeft: 16, fontSize: 11, color: "#B42318" }, children: errors.map((error) => /* @__PURE__ */ jsxs3("li", { children: [
-              error,
-              " \u2014 skipped"
-            ] }, error)) }) : null
-          ] }),
-          /* @__PURE__ */ jsxs3("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
-            /* @__PURE__ */ jsx4("span", { style: { ...FONT2, flex: 1, fontSize: 11, color: MUTED }, children: "Applies to comments made from now on. Saved in this browser." }),
-            /* @__PURE__ */ jsx4(
-              "button",
-              {
-                type: "button",
-                onClick: props.onReset,
-                disabled: !props.customised,
-                style: { ...BUTTON, color: props.customised ? ACCENT : MUTED, cursor: props.customised ? "pointer" : "default" },
-                children: "Use app defaults"
-              }
-            )
-          ] })
+          /* @__PURE__ */ jsx4(
+            "button",
+            {
+              type: "button",
+              onClick: () => props.onRemove(entry.id),
+              "aria-label": `Remove: ${firstLine(entry.message)}`,
+              title: "Leave this one out of the prompt",
+              style: { ...BUTTON, border: 0, padding: "0 4px", color: MUTED, lineHeight: 1.2 },
+              children: "\xD7"
+            }
+          )
+        ] }, entry.id)) }),
+        /* @__PURE__ */ jsxs3("div", { style: { padding: 10, display: "flex", alignItems: "center", gap: 8 }, children: [
+          /* @__PURE__ */ jsx4("span", { style: { ...FONT2, flex: 1, fontSize: 12, color: MUTED }, children: "Copy with Copy prompt \u2192 Console." }),
+          /* @__PURE__ */ jsx4(
+            "button",
+            {
+              type: "button",
+              onClick: props.onClear,
+              disabled: props.entries.length === 0,
+              style: { ...BUTTON, color: ERROR, opacity: props.entries.length === 0 ? 0.5 : 1 },
+              children: "Clear all"
+            }
+          )
         ] })
       ]
     }
   );
 }
-
-// src/page-tools.ts
-var OWN_SELECTOR = "[data-dev-annotator]";
-var MAX_AREA_ELEMENTS = 8;
-function contains(outer, inner) {
-  return inner.left >= outer.x && inner.top >= outer.y && inner.right <= outer.x + outer.width && inner.bottom <= outer.y + outer.height;
-}
-function holds(rect, area) {
-  return rect.left <= area.x && rect.top <= area.y && rect.right >= area.x + area.width && rect.bottom >= area.y + area.height;
-}
-function isContent(element) {
-  if (element.closest(OWN_SELECTOR) !== null) return false;
-  if (element.closest('[aria-hidden="true"]') !== null) return false;
-  return !(element instanceof SVGElement) || element instanceof SVGSVGElement;
-}
-function commonAncestor(elements) {
-  const [first, ...rest] = elements;
-  let node = first ?? null;
-  while (node !== null && !rest.every((element) => node?.contains(element))) node = node.parentElement;
-  return node;
-}
-function coveringAncestor(start, area, body) {
-  let node = start;
-  while (node !== null && node !== body && !holds(node.getBoundingClientRect(), area)) node = node.parentElement;
-  return node ?? body;
-}
-function elementsInArea(doc, area) {
-  const inside2 = [];
-  for (const element of Array.from(doc.body.querySelectorAll("*"))) {
-    if (!isContent(element)) continue;
-    const rect = element.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) continue;
-    if (contains(area, rect) && !inside2.some((kept) => kept.contains(element))) inside2.push(element);
-  }
-  let start;
-  if (inside2.length > 0) {
-    const common = commonAncestor(inside2);
-    start = inside2.length === 1 ? common?.parentElement ?? null : common;
-  } else {
-    const centre = { x: area.x + area.width / 2, y: area.y + area.height / 2 };
-    const under = typeof doc.elementsFromPoint === "function" ? doc.elementsFromPoint(centre.x, centre.y) : [];
-    start = under.find(isContent) ?? null;
-  }
-  return { container: coveringAncestor(start, area, doc.body), inside: inside2.slice(0, MAX_AREA_ELEMENTS) };
-}
-function pauseMotion(doc) {
-  const animations = typeof doc.getAnimations === "function" ? doc.getAnimations().filter((animation) => animation.playState === "running") : [];
-  const videos = Array.from(doc.querySelectorAll("video")).filter((video) => !video.paused);
-  for (const animation of animations) animation.pause();
-  for (const video of videos) video.pause();
-  return () => {
-    for (const animation of animations) animation.play();
-    for (const video of videos) void video.play().catch(() => void 0);
-  };
+function firstLine(message) {
+  return message.trim().split("\n")[0] ?? "";
 }
 
 // src/prompt.ts
@@ -2064,6 +2381,273 @@ function isEmpty(snapshot) {
   return typeof snapshot === "object" && Object.keys(snapshot).length === 0;
 }
 
+// src/console-prompt.ts
+var FRAMES_PER_ENTRY = 12;
+var STACK_SHOWN = 5;
+var MESSAGE_SHOWN = 4e3;
+var LIBRARY_FILE = /(?:^|[/\\])node_modules[/\\]|next[/\\]dist[/\\]|react-dom[^/\\]*\.development|\/@vite\/client|<anonymous>/;
+var SOURCE_LABEL = {
+  "console.error": "console.error",
+  "console.warn": "console.warn",
+  uncaught: "uncaught exception",
+  rejection: "unhandled promise rejection",
+  network: "failed request (logged by the browser)"
+};
+async function locateEntries(entries, resolveFrames) {
+  const perEntry = entries.map(
+    (entry) => entry.stack === null ? [] : parseStack(entry.stack).slice(0, FRAMES_PER_ENTRY)
+  );
+  const resolved = await resolveFrames(perEntry.flat());
+  const out = /* @__PURE__ */ new Map();
+  let at = 0;
+  entries.forEach((entry, index) => {
+    const count = perEntry[index]?.length ?? 0;
+    const frames = resolved.slice(at, at + count);
+    at += count;
+    out.set(
+      entry.id,
+      frames.filter((frame) => frame.ignored !== true && !LIBRARY_FILE.test(frame.file))
+    );
+  });
+  return out;
+}
+function buildConsolePrompt(entries, locations, options) {
+  const errors = entries.filter((entry) => entry.level === "error").length;
+  const warnings = entries.length - errors;
+  const counts = [plural(errors, "error"), plural(warnings, "warning")].filter((part) => part !== null).join(", ");
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  const lines = [
+    `# Console problems: ${options.appName} (${counts})`,
+    "",
+    `Dev environment ${origin}, recorded ${formatTime(options.now)}.` + (options.appDir ? ` The app lives in \`${options.appDir}\`; file paths are from the repo root.` : ""),
+    "",
+    "These warnings and errors were logged in the browser console while using the app. Work through them one by one: find the cause in the app's code and fix it there; do not silence the log or wrap it in a try/catch that hides it. Where an entry names a source location, it is the nearest app frame of its stack, mapped to the original source; framework and library frames are left out. Open the source file before editing. If an entry is caused by a library, say so and propose the fix on the app's side. " + (options.redactor.enabled ? `Personal data has been replaced with \`${REDACTED}\`; never treat it as a real value. ` : "") + "When done, summarise the fixes by entry number."
+  ];
+  entries.forEach((entry, index) => {
+    lines.push("", "---", "", ...section2(entry, index + 1, locations.get(entry.id) ?? [], options));
+  });
+  return `${lines.join("\n")}
+`;
+}
+function section2(entry, number, frames, options) {
+  const message = options.redactor.text(entry.message);
+  const shown = message.length <= MESSAGE_SHOWN ? message : `${message.slice(0, MESSAGE_SHOWN)}\u2026 (truncated)`;
+  const out = [
+    `## ${number}. ${title(entry, message)}`,
+    "",
+    `- **Logged by:** ${SOURCE_LABEL[entry.source]}`,
+    `- **Page:** \`${entry.pathname}\``,
+    entry.count === 1 ? `- **Seen:** once, at ${clock(entry.firstAt)}` : `- **Seen:** ${entry.count} times, first at ${clock(entry.firstAt)}, last at ${clock(entry.lastAt)}`
+  ];
+  const [nearest, ...rest] = frames;
+  if (entry.source !== "network") out.push(`- **Source:** ${nearest === void 0 ? "no app frame in the stack" : location(nearest, options.appDir)}`);
+  if (rest.length > 0) {
+    out.push(`- **Called from:** ${rest.slice(0, STACK_SHOWN - 1).map((frame) => location(frame, options.appDir)).join(" \u2190 ")}`);
+  }
+  out.push("", "```text", shown.replace(/```/g, "'''"), "```");
+  return out;
+}
+function title(entry, message) {
+  const line = headline2(message);
+  if (entry.level === "error" && /^[A-Za-z]*(?:Error|Exception)\b/.test(line)) return line;
+  return `${entry.level === "error" ? "Error" : "Warning"}: ${line}`;
+}
+function headline2(message) {
+  const first = message.trim().split("\n")[0] ?? "";
+  return first.length <= 90 ? first : `${first.slice(0, 90)}\u2026`;
+}
+function clock(iso) {
+  const date = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+function plural(count, noun) {
+  return count === 0 ? null : `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+// src/redaction-panel.tsx
+import { jsx as jsx5, jsxs as jsxs4 } from "react/jsx-runtime";
+var LABEL = { ...FONT2, display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" };
+function RedactionPanel(props) {
+  const { settings } = props;
+  const off = !settings.enabled;
+  const update = (patch) => props.onChange({ ...settings, ...patch });
+  const toggleCountry = (country, on) => update({ countries: COUNTRIES.filter((each) => each === country ? on : settings.countries.includes(each)) });
+  const errors = settings.patterns.flatMap((source, index) => {
+    if (source.trim() === "") return [];
+    const compiled = compilePattern(source);
+    return typeof compiled === "string" ? [`Line ${index + 1}: ${compiled}`] : [];
+  });
+  return /* @__PURE__ */ jsxs4(
+    "div",
+    {
+      role: "dialog",
+      "aria-label": "Redaction settings",
+      style: {
+        ...FONT2,
+        position: "fixed",
+        ...props.anchor,
+        width: 340,
+        maxHeight: "70vh",
+        overflowY: "auto",
+        background: "#FFFFFF",
+        border: `1px solid ${LINE}`,
+        borderRadius: 10,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+        zIndex: Z + 2,
+        boxSizing: "border-box"
+      },
+      children: [
+        /* @__PURE__ */ jsxs4("div", { style: { display: "flex", alignItems: "center", padding: "8px 10px", borderBottom: `1px solid ${LINE}` }, children: [
+          /* @__PURE__ */ jsx5("strong", { style: { ...FONT2, fontWeight: 600 }, children: "Personal data redaction" }),
+          /* @__PURE__ */ jsx5("button", { type: "button", onClick: props.onClose, "aria-label": "Close redaction settings", style: { ...BUTTON, marginLeft: "auto", padding: "2px 8px" }, children: "Close" })
+        ] }),
+        /* @__PURE__ */ jsxs4("div", { style: { ...FONT2, padding: 10, display: "flex", flexDirection: "column", gap: 12 }, children: [
+          /* @__PURE__ */ jsxs4("label", { style: { ...LABEL, alignItems: "center" }, children: [
+            /* @__PURE__ */ jsx5(
+              "input",
+              {
+                type: "checkbox",
+                role: "switch",
+                checked: settings.enabled,
+                "aria-checked": settings.enabled,
+                onChange: (event) => update({ enabled: event.target.checked })
+              }
+            ),
+            /* @__PURE__ */ jsx5("span", { style: { ...FONT2, fontWeight: 600 }, children: "Redact personal data" })
+          ] }),
+          /* @__PURE__ */ jsx5("p", { style: { ...FONT2, margin: 0, fontSize: 12, color: off ? "#B42318" : MUTED }, children: off ? "Off: new comments carry props, state and page text exactly as the page shows them. Password fields stay hidden." : "Values under keys like phone, email, name, address, ID, password or token, and every e-mail address, become [redacted]." }),
+          /* @__PURE__ */ jsxs4("fieldset", { disabled: off, style: { ...FONT2, margin: 0, padding: 0, border: 0, opacity: off ? 0.5 : 1 }, children: [
+            /* @__PURE__ */ jsx5("legend", { style: { ...FONT2, padding: 0, marginBottom: 6, fontWeight: 600 }, children: "Number formats" }),
+            /* @__PURE__ */ jsx5("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: COUNTRIES.map((country) => /* @__PURE__ */ jsxs4("label", { style: LABEL, children: [
+              /* @__PURE__ */ jsx5(
+                "input",
+                {
+                  type: "checkbox",
+                  checked: settings.countries.includes(country),
+                  onChange: (event) => toggleCountry(country, event.target.checked),
+                  style: { marginTop: 3 }
+                }
+              ),
+              /* @__PURE__ */ jsxs4("span", { style: FONT2, children: [
+                COUNTRY_RULES[country].label,
+                /* @__PURE__ */ jsx5("span", { style: { ...FONT2, display: "block", fontSize: 11, color: MUTED }, children: COUNTRY_RULES[country].covers })
+              ] })
+            ] }, country)) })
+          ] }),
+          /* @__PURE__ */ jsxs4("fieldset", { disabled: off, style: { ...FONT2, margin: 0, padding: 0, border: 0, opacity: off ? 0.5 : 1 }, children: [
+            /* @__PURE__ */ jsx5("legend", { style: { ...FONT2, padding: 0, marginBottom: 4, fontWeight: 600 }, children: "Your own patterns" }),
+            /* @__PURE__ */ jsxs4("label", { htmlFor: "agent-annotator-patterns", style: { ...FONT2, display: "block", fontSize: 11, color: MUTED, marginBottom: 4 }, children: [
+              "One regular expression per line, e.g. ",
+              /* @__PURE__ */ jsxs4("code", { children: [
+                "INV-\\d",
+                "{6}"
+              ] }),
+              " or ",
+              /* @__PURE__ */ jsx5("code", { children: "/acct[0-9]+/i" }),
+              "."
+            ] }),
+            /* @__PURE__ */ jsx5(
+              "textarea",
+              {
+                id: "agent-annotator-patterns",
+                value: settings.patterns.join("\n"),
+                onChange: (event) => update({ patterns: event.target.value === "" ? [] : event.target.value.split("\n") }),
+                rows: 3,
+                spellCheck: false,
+                "aria-invalid": errors.length > 0,
+                style: {
+                  ...FONT2,
+                  width: "100%",
+                  boxSizing: "border-box",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontSize: 12,
+                  padding: 6,
+                  border: `1px solid ${errors.length > 0 ? "#B42318" : LINE}`,
+                  borderRadius: 6,
+                  resize: "vertical"
+                }
+              }
+            ),
+            errors.length > 0 ? /* @__PURE__ */ jsx5("ul", { role: "alert", style: { ...FONT2, margin: "4px 0 0", paddingLeft: 16, fontSize: 11, color: "#B42318" }, children: errors.map((error) => /* @__PURE__ */ jsxs4("li", { children: [
+              error,
+              " \u2014 skipped"
+            ] }, error)) }) : null
+          ] }),
+          /* @__PURE__ */ jsxs4("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+            /* @__PURE__ */ jsx5("span", { style: { ...FONT2, flex: 1, fontSize: 11, color: MUTED }, children: "Applies to comments made from now on. Saved in this browser." }),
+            /* @__PURE__ */ jsx5(
+              "button",
+              {
+                type: "button",
+                onClick: props.onReset,
+                disabled: !props.customised,
+                style: { ...BUTTON, color: props.customised ? ACCENT : MUTED, cursor: props.customised ? "pointer" : "default" },
+                children: "Use app defaults"
+              }
+            )
+          ] })
+        ] })
+      ]
+    }
+  );
+}
+
+// src/page-tools.ts
+var OWN_SELECTOR = "[data-dev-annotator]";
+var MAX_AREA_ELEMENTS = 8;
+function contains(outer, inner) {
+  return inner.left >= outer.x && inner.top >= outer.y && inner.right <= outer.x + outer.width && inner.bottom <= outer.y + outer.height;
+}
+function holds(rect, area) {
+  return rect.left <= area.x && rect.top <= area.y && rect.right >= area.x + area.width && rect.bottom >= area.y + area.height;
+}
+function isContent(element) {
+  if (element.closest(OWN_SELECTOR) !== null) return false;
+  if (element.closest('[aria-hidden="true"]') !== null) return false;
+  return !(element instanceof SVGElement) || element instanceof SVGSVGElement;
+}
+function commonAncestor(elements) {
+  const [first, ...rest] = elements;
+  let node = first ?? null;
+  while (node !== null && !rest.every((element) => node?.contains(element))) node = node.parentElement;
+  return node;
+}
+function coveringAncestor(start, area, body) {
+  let node = start;
+  while (node !== null && node !== body && !holds(node.getBoundingClientRect(), area)) node = node.parentElement;
+  return node ?? body;
+}
+function elementsInArea(doc, area) {
+  const inside2 = [];
+  for (const element of Array.from(doc.body.querySelectorAll("*"))) {
+    if (!isContent(element)) continue;
+    const rect = element.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    if (contains(area, rect) && !inside2.some((kept) => kept.contains(element))) inside2.push(element);
+  }
+  let start;
+  if (inside2.length > 0) {
+    const common = commonAncestor(inside2);
+    start = inside2.length === 1 ? common?.parentElement ?? null : common;
+  } else {
+    const centre = { x: area.x + area.width / 2, y: area.y + area.height / 2 };
+    const under = typeof doc.elementsFromPoint === "function" ? doc.elementsFromPoint(centre.x, centre.y) : [];
+    start = under.find(isContent) ?? null;
+  }
+  return { container: coveringAncestor(start, area, doc.body), inside: inside2.slice(0, MAX_AREA_ELEMENTS) };
+}
+function pauseMotion(doc) {
+  const animations = typeof doc.getAnimations === "function" ? doc.getAnimations().filter((animation) => animation.playState === "running") : [];
+  const videos = Array.from(doc.querySelectorAll("video")).filter((video) => !video.paused);
+  for (const animation of animations) animation.pause();
+  for (const video of videos) video.pause();
+  return () => {
+    for (const animation of animations) animation.play();
+    for (const video of videos) void video.play().catch(() => void 0);
+  };
+}
+
 // src/flags.ts
 function readFlag(key) {
   try {
@@ -2173,20 +2757,20 @@ function shotFileName(appName, pathname, now) {
 
 // src/screenshot-editor.tsx
 import {
-  useEffect as useEffect2,
+  useEffect as useEffect3,
   useLayoutEffect as useLayoutEffect2,
-  useRef as useRef2,
-  useState as useState2
+  useRef as useRef3,
+  useState as useState3
 } from "react";
 
 // src/callout-tip.tsx
-import { jsx as jsx5, jsxs as jsxs4 } from "react/jsx-runtime";
+import { jsx as jsx6, jsxs as jsxs5 } from "react/jsx-runtime";
 var FONT3 = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 var RED = "#E5484D";
 var LOOP = "3.2s";
 var KEY_TIMES = "0;0.12;0.55;0.85;1";
 function CalloutTip(props) {
-  return /* @__PURE__ */ jsxs4(
+  return /* @__PURE__ */ jsxs5(
     "div",
     {
       role: "note",
@@ -2206,7 +2790,7 @@ function CalloutTip(props) {
         zIndex: 2
       },
       children: [
-        /* @__PURE__ */ jsx5(
+        /* @__PURE__ */ jsx6(
           "span",
           {
             "aria-hidden": "true",
@@ -2223,10 +2807,10 @@ function CalloutTip(props) {
             }
           }
         ),
-        /* @__PURE__ */ jsx5(Demo, {}),
-        /* @__PURE__ */ jsx5("strong", { style: { display: "block", marginTop: 10, font: `600 13px/1.35 ${FONT3}`, color: "#FFFFFF" }, children: props.nudge ? "Tip: drag instead of clicking" : "Drag to point at something" }),
-        /* @__PURE__ */ jsx5("span", { style: { display: "block", marginTop: 4, color: "#C9C5BE" }, children: props.nudge ? "Press on what you mean and drag to where the text goes: the box gets a tail pointing there." : "Press on what you mean, drag to where the text goes, then type. A plain click makes a box without a tail." }),
-        /* @__PURE__ */ jsx5(
+        /* @__PURE__ */ jsx6(Demo, {}),
+        /* @__PURE__ */ jsx6("strong", { style: { display: "block", marginTop: 10, font: `600 13px/1.35 ${FONT3}`, color: "#FFFFFF" }, children: props.nudge ? "Tip: drag instead of clicking" : "Drag to point at something" }),
+        /* @__PURE__ */ jsx6("span", { style: { display: "block", marginTop: 4, color: "#C9C5BE" }, children: props.nudge ? "Press on what you mean and drag to where the text goes: the box gets a tail pointing there." : "Press on what you mean, drag to where the text goes, then type. A plain click makes a box without a tail." }),
+        /* @__PURE__ */ jsx6(
           "button",
           {
             type: "button",
@@ -2252,24 +2836,24 @@ function CalloutTip(props) {
 function Demo() {
   const x = "52;52;172;172;52";
   const y = "70;70;27;27;70";
-  return /* @__PURE__ */ jsxs4("svg", { width: "240", height: "96", viewBox: "0 0 240 96", "aria-hidden": "true", style: { display: "block", borderRadius: 6, background: "#F6F3EE" }, children: [
-    /* @__PURE__ */ jsx5("rect", { x: "16", y: "56", width: "74", height: "28", rx: "4", fill: "#E6E0D6" }),
-    /* @__PURE__ */ jsx5("rect", { x: "24", y: "64", width: "40", height: "5", rx: "2", fill: "#B9B2A6" }),
-    /* @__PURE__ */ jsx5("rect", { x: "24", y: "73", width: "56", height: "4", rx: "2", fill: "#CFC8BC" }),
-    /* @__PURE__ */ jsxs4("line", { x1: "52", y1: "70", x2: "52", y2: "70", stroke: RED, strokeWidth: "3", strokeLinecap: "round", children: [
-      /* @__PURE__ */ jsx5("animate", { attributeName: "x2", values: x, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
-      /* @__PURE__ */ jsx5("animate", { attributeName: "y2", values: y, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
-      /* @__PURE__ */ jsx5("animate", { attributeName: "opacity", values: "0;1;1;1;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
+  return /* @__PURE__ */ jsxs5("svg", { width: "240", height: "96", viewBox: "0 0 240 96", "aria-hidden": "true", style: { display: "block", borderRadius: 6, background: "#F6F3EE" }, children: [
+    /* @__PURE__ */ jsx6("rect", { x: "16", y: "56", width: "74", height: "28", rx: "4", fill: "#E6E0D6" }),
+    /* @__PURE__ */ jsx6("rect", { x: "24", y: "64", width: "40", height: "5", rx: "2", fill: "#B9B2A6" }),
+    /* @__PURE__ */ jsx6("rect", { x: "24", y: "73", width: "56", height: "4", rx: "2", fill: "#CFC8BC" }),
+    /* @__PURE__ */ jsxs5("line", { x1: "52", y1: "70", x2: "52", y2: "70", stroke: RED, strokeWidth: "3", strokeLinecap: "round", children: [
+      /* @__PURE__ */ jsx6("animate", { attributeName: "x2", values: x, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
+      /* @__PURE__ */ jsx6("animate", { attributeName: "y2", values: y, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
+      /* @__PURE__ */ jsx6("animate", { attributeName: "opacity", values: "0;1;1;1;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
     ] }),
-    /* @__PURE__ */ jsxs4("g", { opacity: "0", children: [
-      /* @__PURE__ */ jsx5("rect", { x: "128", y: "13", width: "92", height: "28", rx: "5", fill: RED }),
-      /* @__PURE__ */ jsx5("text", { x: "174", y: "31.5", textAnchor: "middle", fill: "#FFFFFF", style: { font: `600 12px ${FONT3}` }, children: "Too tight" }),
-      /* @__PURE__ */ jsx5("animate", { attributeName: "opacity", values: "0;0;1;0;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
+    /* @__PURE__ */ jsxs5("g", { opacity: "0", children: [
+      /* @__PURE__ */ jsx6("rect", { x: "128", y: "13", width: "92", height: "28", rx: "5", fill: RED }),
+      /* @__PURE__ */ jsx6("text", { x: "174", y: "31.5", textAnchor: "middle", fill: "#FFFFFF", style: { font: `600 12px ${FONT3}` }, children: "Too tight" }),
+      /* @__PURE__ */ jsx6("animate", { attributeName: "opacity", values: "0;0;1;0;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
     ] }),
-    /* @__PURE__ */ jsx5("circle", { cx: "52", cy: "70", r: "0", fill: "none", stroke: "#1F1E1D", strokeWidth: "1.5", children: /* @__PURE__ */ jsx5("animate", { attributeName: "r", values: "0;11;0;0;0", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }) }),
-    /* @__PURE__ */ jsxs4("g", { children: [
-      /* @__PURE__ */ jsx5("path", { d: "M0 0 L0 15 L4 11 L7 18 L10 17 L7 10 L12 10 Z", fill: "#FFFFFF", stroke: "#1F1E1D", strokeWidth: "1.2", strokeLinejoin: "round" }),
-      /* @__PURE__ */ jsx5("animateTransform", { attributeName: "transform", type: "translate", values: "52 70;52 70;172 27;172 27;52 70", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" })
+    /* @__PURE__ */ jsx6("circle", { cx: "52", cy: "70", r: "0", fill: "none", stroke: "#1F1E1D", strokeWidth: "1.5", children: /* @__PURE__ */ jsx6("animate", { attributeName: "r", values: "0;11;0;0;0", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }) }),
+    /* @__PURE__ */ jsxs5("g", { children: [
+      /* @__PURE__ */ jsx6("path", { d: "M0 0 L0 15 L4 11 L7 18 L10 17 L7 10 L12 10 Z", fill: "#FFFFFF", stroke: "#1F1E1D", strokeWidth: "1.2", strokeLinejoin: "round" }),
+      /* @__PURE__ */ jsx6("animateTransform", { attributeName: "transform", type: "translate", values: "52 70;52 70;172 27;172 27;52 70", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" })
     ] })
   ] });
 }
@@ -2731,7 +3315,7 @@ function drawMark(context, base, mark, width, imageWidth, pixelRatio) {
 }
 
 // src/screenshot-editor.tsx
-import { jsx as jsx6, jsxs as jsxs5 } from "react/jsx-runtime";
+import { jsx as jsx7, jsxs as jsxs6 } from "react/jsx-runtime";
 var TOOLS = [
   { tool: "select", icon: "select", label: "Select & move", key: "V", detail: "Click a mark to select it, drag to move it, Delete to remove it. Double-click text to edit it." },
   { tool: "arrow", icon: "arrow", label: "Arrow", key: "A", detail: "Hold Shift to snap to 45\xB0." },
@@ -2772,25 +3356,25 @@ function textMeasure() {
 function ScreenshotEditor(props) {
   const { image, fileName, onClose, onNotice } = props;
   const ratio = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-  const canvasRef = useRef2(null);
-  const areaRef = useRef2(null);
-  const customColorRef = useRef2(null);
-  const [history, setHistory] = useState2({ past: [], present: EMPTY_DOC, future: [] });
+  const canvasRef = useRef3(null);
+  const areaRef = useRef3(null);
+  const customColorRef = useRef3(null);
+  const [history, setHistory] = useState3({ past: [], present: EMPTY_DOC, future: [] });
   const marks = history.present.marks;
   const crop = history.present.crop;
   const view = crop ?? { x: 0, y: 0, width: image.width, height: image.height };
-  const [saved, setSaved] = useState2(EMPTY_DOC);
-  const [cropDraft, setCropDraftState] = useState2(null);
-  const [tool, setTool] = useState2("arrow");
-  const [color, setColor] = useState2(COLORS[0]);
-  const [weight, setWeight] = useState2(2);
-  const [selectedRaw, setSelected] = useState2(null);
+  const [saved, setSaved] = useState3(EMPTY_DOC);
+  const [cropDraft, setCropDraftState] = useState3(null);
+  const [tool, setTool] = useState3("arrow");
+  const [color, setColor] = useState3(COLORS[0]);
+  const [weight, setWeight] = useState3(2);
+  const [selectedRaw, setSelected] = useState3(null);
   const selected = selectedRaw !== null && selectedRaw < marks.length ? selectedRaw : null;
-  const [drawing, setDrawingState] = useState2(null);
-  const [drag, setDragState] = useState2(null);
-  const drawingRef = useRef2(null);
-  const dragRef = useRef2(null);
-  const cropRef = useRef2(null);
+  const [drawing, setDrawingState] = useState3(null);
+  const [drag, setDragState] = useState3(null);
+  const drawingRef = useRef3(null);
+  const dragRef = useRef3(null);
+  const cropRef = useRef3(null);
   const setDrawing = (next) => {
     drawingRef.current = next;
     setDrawingState(next);
@@ -2803,16 +3387,16 @@ function ScreenshotEditor(props) {
     cropRef.current = next;
     setCropDraftState(next);
   };
-  const [text, setText] = useState2(null);
-  const [hovering, setHovering] = useState2(false);
-  const [spaceHeld, setSpaceHeld] = useState2(false);
-  const [panning, setPanning] = useState2(false);
-  const panRef = useRef2(null);
-  const [confirmClose, setConfirmClose] = useState2(false);
-  const dialogRef = useRef2(null);
-  const [tipDone, setTipDone] = useState2(() => readFlag(CALLOUT_TIP_KEY));
-  const [tipNudge, setTipNudge] = useState2(false);
-  const [tipAt, setTipAt] = useState2(null);
+  const [text, setText] = useState3(null);
+  const [hovering, setHovering] = useState3(false);
+  const [spaceHeld, setSpaceHeld] = useState3(false);
+  const [panning, setPanning] = useState3(false);
+  const panRef = useRef3(null);
+  const [confirmClose, setConfirmClose] = useState3(false);
+  const dialogRef = useRef3(null);
+  const [tipDone, setTipDone] = useState3(() => readFlag(CALLOUT_TIP_KEY));
+  const [tipNudge, setTipNudge] = useState3(false);
+  const [tipAt, setTipAt] = useState3(null);
   const learnCallout = () => {
     setTipDone(true);
     writeFlag(CALLOUT_TIP_KEY, true);
@@ -2827,8 +3411,8 @@ function ScreenshotEditor(props) {
     const frame2 = dialog.getBoundingClientRect();
     setTipAt({ left: Math.max(8, box.left - frame2.left + box.width / 2 - 23), top: box.bottom - frame2.top + 10 });
   }, [showTip]);
-  const [zoom, setZoom] = useState2(null);
-  const [areaSize, setAreaSize] = useState2({ width: 0, height: 0 });
+  const [zoom, setZoom] = useState3(null);
+  const [areaSize, setAreaSize] = useState3({ width: 0, height: 0 });
   const frame = outputFrame(view, marks, image.width, textMeasure());
   const fitScale = areaSize.width > 2 * PAD && areaSize.height > 2 * PAD ? (
     // Never blow a capture up past the size it had on the page.
@@ -2836,8 +3420,8 @@ function ScreenshotEditor(props) {
   ) : 1 / ratio;
   const scale = zoom ?? fitScale;
   const board = boardAround(expand(frame, 12 / scale), view, areaSize, scale);
-  const [background] = useState2(() => edgeColor(image));
-  const anchorRef = useRef2(null);
+  const [background] = useState3(() => edgeColor(image));
+  const anchorRef = useRef3(null);
   const dirty = history.present !== saved && (marks.length > 0 || crop !== null);
   const commitDoc = (change) => setHistory((current) => ({ past: [...current.past, current.present], present: change(current.present), future: [] }));
   const commit = (next) => commitDoc((doc) => ({ ...doc, marks: next }));
@@ -2869,11 +3453,11 @@ function ScreenshotEditor(props) {
   const liveFrame = outputFrame(view, visible, image.width, textMeasure());
   const paintBase = { view: board, image: view, frame: liveFrame, background, backdrop: "#0E0E0E", pixelRatio: ratio };
   const cropBox = cropDraft === null ? null : clampTo(normalized(cropDraft.from, cropDraft.to), view);
-  useEffect2(() => {
+  useEffect3(() => {
     const canvas = canvasRef.current;
     if (canvas !== null) paint(canvas, image, visible, { ...paintBase, selected: outline, accent: "#0091FF", cropPreview: cropBox });
   });
-  useEffect2(() => {
+  useEffect3(() => {
     const area = areaRef.current;
     if (area === null) return void 0;
     const measure = () => setAreaSize({ width: area.clientWidth, height: area.clientHeight });
@@ -2912,13 +3496,13 @@ function ScreenshotEditor(props) {
     const next = direction === 1 ? ZOOM_STOPS.find((stop) => stop > percent * 1.01) : [...ZOOM_STOPS].reverse().find((stop) => stop < percent * 0.99);
     if (next !== void 0) zoomTo(next / ratio);
   };
-  const wheelRef = useRef2(() => void 0);
+  const wheelRef = useRef3(() => void 0);
   const onWheel = (event) => {
     if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     zoomTo(scale * Math.exp(-event.deltaY * 0.01), { x: event.clientX, y: event.clientY });
   };
-  useEffect2(() => {
+  useEffect3(() => {
     const area = areaRef.current;
     if (area === null) return void 0;
     const onWheel2 = (event) => wheelRef.current(event);
@@ -3105,8 +3689,8 @@ function ScreenshotEditor(props) {
       setWeight(mark.weight);
     }
   };
-  const pickColorRef = useRef2(pickColor);
-  useEffect2(() => {
+  const pickColorRef = useRef3(pickColor);
+  useEffect3(() => {
     const input = customColorRef.current;
     if (input === null) return void 0;
     const onChange = () => pickColorRef.current(input.value);
@@ -3143,12 +3727,12 @@ function ScreenshotEditor(props) {
     }
     onClose();
   };
-  useEffect2(() => {
+  useEffect3(() => {
     if (!confirmClose) return void 0;
     const timer = window.setTimeout(() => setConfirmClose(false), 3e3);
     return () => window.clearTimeout(timer);
   }, [confirmClose]);
-  const keyRef = useRef2(() => false);
+  const keyRef = useRef3(() => false);
   const onKey = (event) => {
     const command = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
@@ -3201,7 +3785,7 @@ function ScreenshotEditor(props) {
     wheelRef.current = onWheel;
     pickColorRef.current = pickColor;
   });
-  useEffect2(() => {
+  useEffect3(() => {
     const typing = (target) => target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement && target.type !== "color";
     const onKeyDown = (event) => {
       if (typing(event.target)) return;
@@ -3228,7 +3812,7 @@ function ScreenshotEditor(props) {
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : tool === "select" ? drag !== null ? "grabbing" : hovering ? "move" : "default" : "crosshair";
   const custom = !COLORS.includes(color.toUpperCase());
   const textLayout = text === null ? null : calloutLayout({ at: text.at, text: text.value, weight: text.weight }, image.width, measureText());
-  return /* @__PURE__ */ jsxs5(
+  return /* @__PURE__ */ jsxs6(
     "div",
     {
       ref: dialogRef,
@@ -3237,14 +3821,14 @@ function ScreenshotEditor(props) {
       "aria-label": "Screenshot editor",
       style: { ...FONT2, position: "fixed", inset: 0, display: "flex", flexDirection: "column", background: "#0E0E0E", zIndex: Z + 5 },
       children: [
-        /* @__PURE__ */ jsxs5(
+        /* @__PURE__ */ jsxs6(
           "div",
           {
             role: "toolbar",
             "aria-label": "Markup tools",
             style: { display: "flex", alignItems: "center", gap: 2, padding: "8px 12px", background: INK, borderBottom: "1px solid rgba(255,255,255,0.12)", flexWrap: "wrap", rowGap: 6 },
             children: [
-              TOOLS.map((entry) => /* @__PURE__ */ jsx6(
+              TOOLS.map((entry) => /* @__PURE__ */ jsx7(
                 BarButton,
                 {
                   icon: entry.icon,
@@ -3256,8 +3840,8 @@ function ScreenshotEditor(props) {
                 },
                 entry.tool
               )),
-              /* @__PURE__ */ jsx6(Divider2, {}),
-              COLORS.map((swatch) => /* @__PURE__ */ jsx6(Tooltip, { label: COLOR_NAMES[swatch] ?? swatch, placement: "below", children: (describedBy) => /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7(Divider2, {}),
+              COLORS.map((swatch) => /* @__PURE__ */ jsx7(Tooltip, { label: COLOR_NAMES[swatch] ?? swatch, placement: "below", children: (describedBy) => /* @__PURE__ */ jsx7(
                 "button",
                 {
                   type: "button",
@@ -3268,8 +3852,8 @@ function ScreenshotEditor(props) {
                   style: swatchStyle(swatch, color.toUpperCase() === swatch)
                 }
               ) }, swatch)),
-              /* @__PURE__ */ jsx6(Tooltip, { label: "Custom colour", detail: "Pick any colour.", placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs5("span", { style: { position: "relative", display: "inline-flex" }, children: [
-                /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7(Tooltip, { label: "Custom colour", detail: "Pick any colour.", placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs6("span", { style: { position: "relative", display: "inline-flex" }, children: [
+                /* @__PURE__ */ jsx7(
                   "span",
                   {
                     "aria-hidden": "true",
@@ -3279,7 +3863,7 @@ function ScreenshotEditor(props) {
                     }
                   }
                 ),
-                /* @__PURE__ */ jsx6(
+                /* @__PURE__ */ jsx7(
                   "input",
                   {
                     ref: customColorRef,
@@ -3292,8 +3876,8 @@ function ScreenshotEditor(props) {
                   }
                 )
               ] }) }),
-              /* @__PURE__ */ jsx6(Divider2, {}),
-              WEIGHTS.map((entry) => /* @__PURE__ */ jsx6(Tooltip, { label: `${entry.label} stroke`, shortcut: [String(entry.weight)], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7(Divider2, {}),
+              WEIGHTS.map((entry) => /* @__PURE__ */ jsx7(Tooltip, { label: `${entry.label} stroke`, shortcut: [String(entry.weight)], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx7(
                 "button",
                 {
                   type: "button",
@@ -3302,13 +3886,13 @@ function ScreenshotEditor(props) {
                   "aria-describedby": describedBy,
                   "aria-pressed": weight === entry.weight,
                   style: { ...iconButton(weight === entry.weight), width: 30, minWidth: 30 },
-                  children: /* @__PURE__ */ jsx6("span", { "aria-hidden": "true", style: { width: entry.dot, height: entry.dot, borderRadius: entry.dot, background: "#FFFFFF" } })
+                  children: /* @__PURE__ */ jsx7("span", { "aria-hidden": "true", style: { width: entry.dot, height: entry.dot, borderRadius: entry.dot, background: "#FFFFFF" } })
                 }
               ) }, entry.weight)),
-              /* @__PURE__ */ jsx6(Divider2, {}),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "undo", label: "Undo", shortcut: [MOD_KEY, "Z"], disabled: history.past.length === 0, onClick: undo }),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "redo", label: "Redo", shortcut: [MOD_KEY, "\u21E7", "Z"], disabled: history.future.length === 0, onClick: redo }),
-              /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7(Divider2, {}),
+              /* @__PURE__ */ jsx7(BarButton, { icon: "undo", label: "Undo", shortcut: [MOD_KEY, "Z"], disabled: history.past.length === 0, onClick: undo }),
+              /* @__PURE__ */ jsx7(BarButton, { icon: "redo", label: "Redo", shortcut: [MOD_KEY, "\u21E7", "Z"], disabled: history.future.length === 0, onClick: redo }),
+              /* @__PURE__ */ jsx7(
                 BarButton,
                 {
                   icon: "eraser",
@@ -3323,8 +3907,8 @@ function ScreenshotEditor(props) {
                   }
                 }
               ),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "trash", label: "Clear all marks", disabled: marks.length === 0, onClick: () => commit(NO_MARKS) }),
-              /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7(BarButton, { icon: "trash", label: "Clear all marks", disabled: marks.length === 0, onClick: () => commit(NO_MARKS) }),
+              /* @__PURE__ */ jsx7(
                 BarButton,
                 {
                   icon: "cropOff",
@@ -3334,9 +3918,9 @@ function ScreenshotEditor(props) {
                   onClick: () => commitCrop(null)
                 }
               ),
-              /* @__PURE__ */ jsx6("span", { style: { flex: 1, minWidth: 8 } }),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "zoomOut", label: "Zoom out", shortcut: [MOD_KEY, "\u2212"], disabled: percent <= MIN_ZOOM * 1.01, onClick: () => zoomStep(-1) }),
-              /* @__PURE__ */ jsx6(Tooltip, { label: zoom === null ? "Actual size" : "Fit to window", shortcut: zoom === null ? [MOD_KEY, "1"] : [MOD_KEY, "0"], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7("span", { style: { flex: 1, minWidth: 8 } }),
+              /* @__PURE__ */ jsx7(BarButton, { icon: "zoomOut", label: "Zoom out", shortcut: [MOD_KEY, "\u2212"], disabled: percent <= MIN_ZOOM * 1.01, onClick: () => zoomStep(-1) }),
+              /* @__PURE__ */ jsx7(Tooltip, { label: zoom === null ? "Actual size" : "Fit to window", shortcut: zoom === null ? [MOD_KEY, "1"] : [MOD_KEY, "0"], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx7(
                 "button",
                 {
                   type: "button",
@@ -3344,18 +3928,18 @@ function ScreenshotEditor(props) {
                   "aria-label": `Zoom ${Math.round(percent * 100)}%`,
                   "aria-describedby": describedBy,
                   style: { ...iconButton(false), minWidth: 54, padding: "0 6px", fontVariantNumeric: "tabular-nums" },
-                  children: /* @__PURE__ */ jsxs5("span", { style: { ...FONT2, color: "inherit", fontWeight: 600, fontSize: 12 }, children: [
+                  children: /* @__PURE__ */ jsxs6("span", { style: { ...FONT2, color: "inherit", fontWeight: 600, fontSize: 12 }, children: [
                     Math.round(percent * 100),
                     "%"
                   ] })
                 }
               ) }),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "zoomIn", label: "Zoom in", shortcut: [MOD_KEY, "+"], disabled: percent >= MAX_ZOOM * 0.99, onClick: () => zoomStep(1) }),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "fit", label: "Fit to window", shortcut: [MOD_KEY, "0"], pressed: zoom === null, onClick: () => zoomTo(null) }),
-              /* @__PURE__ */ jsx6(Divider2, {}),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "copy", label: "Copy image", shortcut: [MOD_KEY, "C"], text: "Copy", primary: true, onClick: () => void run("copy") }),
-              /* @__PURE__ */ jsx6(BarButton, { icon: "download", label: "Save as PNG", detail: fileName, shortcut: [MOD_KEY, "S"], text: "Save", onClick: () => void run("save") }),
-              /* @__PURE__ */ jsx6(
+              /* @__PURE__ */ jsx7(BarButton, { icon: "zoomIn", label: "Zoom in", shortcut: [MOD_KEY, "+"], disabled: percent >= MAX_ZOOM * 0.99, onClick: () => zoomStep(1) }),
+              /* @__PURE__ */ jsx7(BarButton, { icon: "fit", label: "Fit to window", shortcut: [MOD_KEY, "0"], pressed: zoom === null, onClick: () => zoomTo(null) }),
+              /* @__PURE__ */ jsx7(Divider2, {}),
+              /* @__PURE__ */ jsx7(BarButton, { icon: "copy", label: "Copy image", shortcut: [MOD_KEY, "C"], text: "Copy", primary: true, onClick: () => void run("copy") }),
+              /* @__PURE__ */ jsx7(BarButton, { icon: "download", label: "Save as PNG", detail: fileName, shortcut: [MOD_KEY, "S"], text: "Save", onClick: () => void run("save") }),
+              /* @__PURE__ */ jsx7(
                 BarButton,
                 {
                   icon: "close",
@@ -3369,9 +3953,9 @@ function ScreenshotEditor(props) {
             ]
           }
         ),
-        showTip && tipAt !== null ? /* @__PURE__ */ jsx6(CalloutTip, { left: tipAt.left, top: tipAt.top, nudge: tipNudge, onDismiss: learnCallout }) : null,
-        /* @__PURE__ */ jsx6("div", { ref: areaRef, style: { position: "relative", flex: 1, minHeight: 0, overflow: "auto" }, children: /* @__PURE__ */ jsx6("div", { style: { display: "flex", minWidth: "100%", minHeight: "100%", width: "max-content", height: "max-content" }, children: /* @__PURE__ */ jsxs5("div", { style: { position: "relative", margin: "auto", width: board.width * scale, height: board.height * scale, flex: "none" }, children: [
-          /* @__PURE__ */ jsx6(
+        showTip && tipAt !== null ? /* @__PURE__ */ jsx7(CalloutTip, { left: tipAt.left, top: tipAt.top, nudge: tipNudge, onDismiss: learnCallout }) : null,
+        /* @__PURE__ */ jsx7("div", { ref: areaRef, style: { position: "relative", flex: 1, minHeight: 0, overflow: "auto" }, children: /* @__PURE__ */ jsx7("div", { style: { display: "flex", minWidth: "100%", minHeight: "100%", width: "max-content", height: "max-content" }, children: /* @__PURE__ */ jsxs6("div", { style: { position: "relative", margin: "auto", width: board.width * scale, height: board.height * scale, flex: "none" }, children: [
+          /* @__PURE__ */ jsx7(
             "canvas",
             {
               ref: canvasRef,
@@ -3395,7 +3979,7 @@ function ScreenshotEditor(props) {
               }
             }
           ),
-          text === null || textLayout === null ? null : /* @__PURE__ */ jsx6(
+          text === null || textLayout === null ? null : /* @__PURE__ */ jsx7(
             "textarea",
             {
               "aria-label": "Callout text",
@@ -3439,7 +4023,7 @@ function ScreenshotEditor(props) {
             }
           )
         ] }) }) }),
-        /* @__PURE__ */ jsx6(
+        /* @__PURE__ */ jsx7(
           "div",
           {
             "aria-hidden": "true",
@@ -3494,10 +4078,10 @@ function iconButton(pressed) {
   };
 }
 function Divider2() {
-  return /* @__PURE__ */ jsx6("span", { "aria-hidden": "true", style: { width: 1, height: 20, margin: "0 6px", background: "rgba(255,255,255,0.18)" } });
+  return /* @__PURE__ */ jsx7("span", { "aria-hidden": "true", style: { width: 1, height: 20, margin: "0 6px", background: "rgba(255,255,255,0.18)" } });
 }
 function BarButton(props) {
-  return /* @__PURE__ */ jsx6(Tooltip, { label: props.label, ...props.detail === void 0 ? {} : { detail: props.detail }, ...props.shortcut === void 0 ? {} : { shortcut: props.shortcut }, placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs5(
+  return /* @__PURE__ */ jsx7(Tooltip, { label: props.label, ...props.detail === void 0 ? {} : { detail: props.detail }, ...props.shortcut === void 0 ? {} : { shortcut: props.shortcut }, placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs6(
     "button",
     {
       type: "button",
@@ -3514,8 +4098,8 @@ function BarButton(props) {
         background: props.danger ? "#B42318" : props.primary ? ACCENT : props.pressed ? "rgba(255,255,255,0.2)" : "transparent"
       },
       children: [
-        /* @__PURE__ */ jsx6(Icon, { name: props.icon }),
-        props.text === void 0 ? null : /* @__PURE__ */ jsx6("span", { style: { ...FONT2, color: "inherit", fontWeight: 600 }, children: props.text })
+        /* @__PURE__ */ jsx7(Icon, { name: props.icon }),
+        props.text === void 0 ? null : /* @__PURE__ */ jsx7("span", { style: { ...FONT2, color: "inherit", fontWeight: 600 }, children: props.text })
       ]
     }
   ) });
@@ -3553,8 +4137,46 @@ function boardAround(content, image, area, scale) {
   return { x, y, width: right - x, height: bottom - y };
 }
 
+// src/toolbar-dock.ts
+var DEFAULT_DOCK = { right: 16, bottom: 16 };
+var DOCK_KEY = "agent-annotator:toolbar-dock";
+var MARGIN2 = 8;
+var GAP2 = 12;
+function readDock() {
+  try {
+    const raw = window.localStorage.getItem(DOCK_KEY);
+    const parsed = raw === null ? null : JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && Number.isFinite(parsed.right) && Number.isFinite(parsed.bottom)) {
+      return { right: parsed.right, bottom: parsed.bottom };
+    }
+  } catch {
+  }
+  return DEFAULT_DOCK;
+}
+function writeDock(dock) {
+  try {
+    if (dock === null) window.localStorage.removeItem(DOCK_KEY);
+    else window.localStorage.setItem(DOCK_KEY, JSON.stringify({ right: Math.round(dock.right), bottom: Math.round(dock.bottom) }));
+  } catch {
+  }
+}
+function clampDock(dock, toolbar, viewport) {
+  const clamp = (value, max) => Math.min(Math.max(value, MARGIN2), Math.max(MARGIN2, max));
+  return {
+    right: clamp(dock.right, viewport.width - toolbar.width - MARGIN2),
+    bottom: clamp(dock.bottom, viewport.height - toolbar.height - MARGIN2)
+  };
+}
+function opensBelow(dock, toolbar, viewport) {
+  return dock.bottom + toolbar.height / 2 > viewport.height / 2;
+}
+function panelAnchor(dock, toolbar, viewport, width) {
+  const right = Math.max(MARGIN2, Math.min(dock.right, viewport.width - width - MARGIN2));
+  return opensBelow(dock, toolbar, viewport) ? { right, top: viewport.height - dock.bottom + GAP2 } : { right, bottom: dock.bottom + toolbar.height + GAP2 };
+}
+
 // src/annotator.tsx
-import { jsx as jsx7, jsxs as jsxs6 } from "react/jsx-runtime";
+import { jsx as jsx8, jsxs as jsxs7 } from "react/jsx-runtime";
 var ISOLATED = ["pointerdown", "pointerup", "mousedown", "mouseup", "dblclick"];
 var REFLOW_MS = 400;
 var MIN_AREA = 8;
@@ -3562,6 +4184,7 @@ var HINT_HIDDEN_KEY = "agent-annotator:hint-hidden";
 var SHOW_COMMENTS_KEY = "agent-annotator:show-comments";
 var COLLAPSED_KEY = "agent-annotator:toolbar-collapsed";
 var NOTICE_MS = 5e3;
+var NO_CONSOLE_ENTRIES = [];
 var KIND_LABEL = {
   element: () => "",
   text: () => "text",
@@ -3573,38 +4196,68 @@ function DevAnnotator(props) {
   const storageKey = `agent-annotator:${appName}`;
   const redactionKey = `agent-annotator:redaction:${appName}`;
   const redactionDefaults = resolveRedaction(props.redaction);
-  const [savedRedaction, setSavedRedaction] = useState3(() => readRedaction(redactionKey));
+  const [savedRedaction, setSavedRedaction] = useState4(() => readRedaction(redactionKey));
   const redaction = savedRedaction ?? redactionDefaults;
   const redactionJson = JSON.stringify(redaction);
   const redactor = useMemo(() => createRedactor(JSON.parse(redactionJson)), [redactionJson]);
-  const [settingsOpen, setSettingsOpen] = useState3(false);
-  const [resolveFrames] = useState3(() => props.resolveFrames ?? createNextResolver());
-  const [active, setActive] = useState3(false);
-  const [items, setItems] = useState3(() => restore(storageKey));
-  const [includeData, setIncludeData] = useState3(true);
-  const [panelOpen, setPanelOpen] = useState3(true);
-  const [paused, setPaused] = useState3(false);
-  const [hintHidden, setHintHidden] = useState3(() => readFlag(HINT_HIDDEN_KEY));
-  const [hover, setHover] = useState3(null);
-  const [group, setGroup] = useState3([]);
-  const [dragBox, setDragBox] = useState3(null);
-  const [draft, setDraft] = useState3(null);
-  const [showComments, setShowComments] = useState3(() => readFlag(SHOW_COMMENTS_KEY));
-  const [collapsed, setCollapsed] = useState3(() => readFlag(COLLAPSED_KEY));
-  const [capturing, setCapturing] = useState3(false);
-  const [shot, setShot] = useState3(null);
-  const [notice, setNotice] = useState3(null);
-  const [, setFrame] = useState3(0);
-  useEffect3(() => {
+  const [settingsOpen, setSettingsOpen] = useState4(false);
+  const [resolveFrames] = useState4(() => props.resolveFrames ?? createNextResolver());
+  const [active, setActive] = useState4(false);
+  const [items, setItems] = useState4(() => restore(storageKey));
+  const [includeData, setIncludeData] = useState4(true);
+  const [panelOpen, setPanelOpen] = useState4(true);
+  const [paused, setPaused] = useState4(false);
+  const [hintHidden, setHintHidden] = useState4(() => readFlag(HINT_HIDDEN_KEY));
+  const [hover, setHover] = useState4(null);
+  const [group, setGroup] = useState4([]);
+  const [dragBox, setDragBox] = useState4(null);
+  const [draft, setDraft] = useState4(null);
+  const [showComments, setShowComments] = useState4(() => readFlag(SHOW_COMMENTS_KEY));
+  const [collapsed, setCollapsed] = useState4(() => readFlag(COLLAPSED_KEY));
+  const [capturing, setCapturing] = useState4(false);
+  const [shot, setShot] = useState4(null);
+  const [notice, setNotice] = useState4(null);
+  const [, setFrame] = useState4(0);
+  const [dock, setDock] = useState4(readDock);
+  const dockRef = useRef4(dock);
+  const [toolbarNode, setToolbarNode] = useState4(null);
+  const [toolbarSize, setToolbarSize] = useState4({ width: 44, height: 44 });
+  const [viewport, setViewport] = useState4(() => viewportSize());
+  useLayoutEffect3(() => {
+    const node = toolbarNode;
+    if (node === null) return void 0;
+    const measure = () => {
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0) return;
+      setToolbarSize(
+        (current) => current.width === rect.width && current.height === rect.height ? current : { width: rect.width, height: rect.height }
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return void 0;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [toolbarNode]);
+  useEffect4(() => {
+    const onResize = () => setViewport(viewportSize());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  useState4(installConsoleCapture);
+  const consoleLog = useSyncExternalStore(subscribeConsole, consoleEntries, () => NO_CONSOLE_ENTRIES);
+  const consoleErrors = consoleLog.filter((entry) => entry.level === "error").length;
+  const [consoleOpen, setConsoleOpen] = useState4(false);
+  useEffect4(() => {
     persist(
       storageKey,
       items.map((item) => item.annotation)
     );
   }, [items, storageKey]);
-  const draftRef = useRef3(null);
-  const groupRef = useRef3([]);
-  const shotOpenRef = useRef3(false);
-  useEffect3(() => {
+  const draftRef = useRef4(null);
+  const groupRef = useRef4([]);
+  const shotOpenRef = useRef4(false);
+  useEffect4(() => {
     draftRef.current = draft;
     groupRef.current = group;
     shotOpenRef.current = shot !== null || capturing;
@@ -3623,7 +4276,7 @@ function DevAnnotator(props) {
     },
     [resolveFrames, redactor]
   );
-  useEffect3(() => {
+  useEffect4(() => {
     if (!active) return void 0;
     let dragStart = null;
     let swallowNextClick = false;
@@ -3734,7 +4387,7 @@ function DevAnnotator(props) {
       setDragBox(null);
     };
   }, [active, startDraft]);
-  useEffect3(() => {
+  useEffect4(() => {
     const onKey = (event) => {
       if (shotOpenRef.current) return;
       if (event.altKey && event.shiftKey && event.code === "KeyC") {
@@ -3749,14 +4402,14 @@ function DevAnnotator(props) {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
-  useEffect3(() => paused ? pauseMotion(document) : void 0, [paused]);
-  useEffect3(() => {
+  useEffect4(() => paused ? pauseMotion(document) : void 0, [paused]);
+  useEffect4(() => {
     if (notice === null) return void 0;
     const timer = window.setTimeout(() => setNotice(null), NOTICE_MS);
     return () => window.clearTimeout(timer);
   }, [notice]);
   const tracking = active || draft !== null || items.length > 0;
-  useEffect3(() => {
+  useEffect4(() => {
     if (!tracking) return void 0;
     const bump = () => setFrame((frame) => frame + 1);
     window.addEventListener("scroll", bump, true);
@@ -3783,7 +4436,7 @@ function DevAnnotator(props) {
     }
     const targets = await draft.captures;
     const annotation = {
-      id: newId(),
+      id: newId2(),
       kind: draft.kind,
       comment,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -3827,6 +4480,16 @@ function DevAnnotator(props) {
       detail: `Paste it into Claude Code, Codex or Cursor. It gives the file, line and component behind ${count === 1 ? "your comment" : `each of your ${count} comments`}.`
     });
   };
+  const copyConsolePrompt = async () => {
+    const chosen = consoleLog;
+    if (chosen.length === 0) return;
+    const locations = await locateEntries(chosen, resolveFrames);
+    await writeClipboard(buildConsolePrompt(chosen, locations, { appName, appDir, redactor, now: /* @__PURE__ */ new Date() }));
+    setNotice({
+      title: "Console prompt copied \u2014 ready for your coding agent",
+      detail: `${chosen.length === 1 ? "The entry carries" : `Each of the ${chosen.length} entries carries`} its message and the nearest source line of its stack.`
+    });
+  };
   const takeScreenshot = async () => {
     setDraft(null);
     setPanelOpen(false);
@@ -3868,6 +4531,14 @@ function DevAnnotator(props) {
     setHintHidden(hidden);
     writeFlag(HINT_HIDDEN_KEY, hidden);
   };
+  const placedDock = clampDock(dock, toolbarSize, viewport);
+  const below = opensBelow(placedDock, toolbarSize, viewport);
+  const anchor = (width) => panelAnchor(placedDock, toolbarSize, viewport, width);
+  const moveDock = (next) => {
+    const placed = clampDock(next, toolbarSize, viewport);
+    dockRef.current = placed;
+    setDock(placed);
+  };
   const draftElement = draft?.elements[0];
   const draftBox = draftElement?.isConnected ? boxOf(draftElement) : null;
   const onScreen = items.flatMap((item, index) => {
@@ -3883,15 +4554,15 @@ function DevAnnotator(props) {
     const item = items[number - 1];
     if (item !== void 0) editItem(item.annotation.id);
   };
-  const overlay = capturing ? /* @__PURE__ */ jsx7("div", { "data-dev-annotator": "", children: /* @__PURE__ */ jsx7(Callouts, { callouts: callouts ?? [], onEdit: null }) }) : /* @__PURE__ */ jsxs6("div", { "data-dev-annotator": "", children: [
-    active && !hintHidden ? /* @__PURE__ */ jsx7(Hint, { onDismiss: () => hideHint(true) }) : null,
-    active && hover !== null && hover.element !== draftElement && dragBox === null ? /* @__PURE__ */ jsx7(Highlight, { box: boxOf(hover.element), label: hover.label, strong: false }) : null,
-    group.map((element, index) => /* @__PURE__ */ jsx7(Highlight, { box: boxOf(element), label: `#${index + 1}`, strong: true }, index)),
-    dragBox !== null ? /* @__PURE__ */ jsx7(AreaBox, { box: { top: dragBox.y, left: dragBox.x, width: dragBox.width, height: dragBox.height } }) : null,
-    draft?.area !== void 0 ? /* @__PURE__ */ jsx7(AreaBox, { box: { top: draft.area.y, left: draft.area.x, width: draft.area.width, height: draft.area.height } }) : null,
-    draft !== null && draft.kind !== "area" ? draft.elements.filter((element) => element.isConnected).map((element, index) => /* @__PURE__ */ jsx7(Highlight, { box: boxOf(element), label: index === 0 ? draft.label : `#${index + 1}`, strong: true }, index)) : null,
-    callouts !== null ? /* @__PURE__ */ jsx7(Callouts, { callouts, onEdit: editNumber }) : onScreen.map((target) => /* @__PURE__ */ jsx7(Pin, { box: target.box, number: target.number, onClick: () => editNumber(target.number) }, target.number)),
-    draft !== null ? /* @__PURE__ */ jsx7(
+  const overlay = capturing ? /* @__PURE__ */ jsx8("div", { "data-dev-annotator": "", children: /* @__PURE__ */ jsx8(Callouts, { callouts: callouts ?? [], onEdit: null }) }) : /* @__PURE__ */ jsxs7("div", { "data-dev-annotator": "", children: [
+    active && !hintHidden ? /* @__PURE__ */ jsx8(Hint, { onDismiss: () => hideHint(true) }) : null,
+    active && hover !== null && hover.element !== draftElement && dragBox === null ? /* @__PURE__ */ jsx8(Highlight, { box: boxOf(hover.element), label: hover.label, strong: false }) : null,
+    group.map((element, index) => /* @__PURE__ */ jsx8(Highlight, { box: boxOf(element), label: `#${index + 1}`, strong: true }, index)),
+    dragBox !== null ? /* @__PURE__ */ jsx8(AreaBox, { box: { top: dragBox.y, left: dragBox.x, width: dragBox.width, height: dragBox.height } }) : null,
+    draft?.area !== void 0 ? /* @__PURE__ */ jsx8(AreaBox, { box: { top: draft.area.y, left: draft.area.x, width: draft.area.width, height: draft.area.height } }) : null,
+    draft !== null && draft.kind !== "area" ? draft.elements.filter((element) => element.isConnected).map((element, index) => /* @__PURE__ */ jsx8(Highlight, { box: boxOf(element), label: index === 0 ? draft.label : `#${index + 1}`, strong: true }, index)) : null,
+    callouts !== null ? /* @__PURE__ */ jsx8(Callouts, { callouts, onEdit: editNumber }) : onScreen.map((target) => /* @__PURE__ */ jsx8(Pin, { box: target.box, number: target.number, onClick: () => editNumber(target.number) }, target.number)),
+    draft !== null ? /* @__PURE__ */ jsx8(
       Editor,
       {
         anchor: draft.area === void 0 ? draftBox : areaBox(draft.area),
@@ -3908,7 +4579,7 @@ function DevAnnotator(props) {
         }
       }
     ) : null,
-    settingsOpen && !collapsed ? /* @__PURE__ */ jsx7(
+    settingsOpen && !collapsed ? /* @__PURE__ */ jsx8(
       RedactionPanel,
       {
         settings: redaction,
@@ -3921,10 +4592,21 @@ function DevAnnotator(props) {
           setSavedRedaction(null);
           writeRedaction(redactionKey, null);
         },
-        onClose: () => setSettingsOpen(false)
+        onClose: () => setSettingsOpen(false),
+        anchor: anchor(340)
       }
     ) : null,
-    panelOpen && !settingsOpen && !collapsed && items.length > 0 ? /* @__PURE__ */ jsx7(
+    consoleOpen && !settingsOpen && !collapsed ? /* @__PURE__ */ jsx8(
+      ConsolePanel,
+      {
+        entries: consoleLog,
+        onRemove: (id) => clearConsole(/* @__PURE__ */ new Set([id])),
+        onClear: () => clearConsole(),
+        onClose: () => setConsoleOpen(false),
+        anchor: anchor(380)
+      }
+    ) : null,
+    panelOpen && !settingsOpen && !consoleOpen && !collapsed && items.length > 0 ? /* @__PURE__ */ jsx8(
       Panel,
       {
         entries,
@@ -3936,22 +4618,43 @@ function DevAnnotator(props) {
           setDraft(null);
           setItems([]);
         },
-        onClose: () => setPanelOpen(false)
+        onClose: () => setPanelOpen(false),
+        anchor: anchor(340)
       }
     ) : null,
-    /* @__PURE__ */ jsx7(
+    /* @__PURE__ */ jsx8(
       Toolbar,
       {
         active,
         paused,
         count: items.length,
-        panelOpen,
+        panelOpen: panelOpen && !consoleOpen,
         showComments,
         capturing,
         collapsed,
         redactionOn: redaction.enabled,
         settingsOpen,
-        onToggleSettings: () => setSettingsOpen(!settingsOpen),
+        onToggleSettings: () => {
+          setSettingsOpen(!settingsOpen);
+          setConsoleOpen(false);
+        },
+        dock: placedDock,
+        placement: below ? "below" : "above",
+        frame: setToolbarNode,
+        onDockMove: moveDock,
+        onDockDrop: () => writeDock(dockRef.current),
+        onDockReset: () => {
+          dockRef.current = DEFAULT_DOCK;
+          setDock(DEFAULT_DOCK);
+          writeDock(null);
+        },
+        consoleCount: consoleLog.length,
+        consoleErrors,
+        consoleOpen: consoleOpen && !settingsOpen,
+        onToggleConsole: () => {
+          setConsoleOpen(!(consoleOpen && !settingsOpen));
+          setSettingsOpen(false);
+        },
         onToggleCollapsed: () => {
           setCollapsed(!collapsed);
           writeFlag(COLLAPSED_KEY, !collapsed);
@@ -3961,14 +4664,20 @@ function DevAnnotator(props) {
         onTogglePaused: () => setPaused((value) => !value),
         onToggleComments: toggleComments,
         onScreenshot: () => void takeScreenshot(),
-        onTogglePanel: () => setPanelOpen((value) => !value),
-        onCopy: () => void copyPrompt()
+        onTogglePanel: () => {
+          setPanelOpen(!(panelOpen && !consoleOpen));
+          setConsoleOpen(false);
+        },
+        onCopy: (what) => void (what === "console" ? copyConsolePrompt() : copyPrompt())
       }
     ),
-    notice !== null ? /* @__PURE__ */ jsx7(Toast, { notice, onDismiss: () => setNotice(null) }) : null,
-    shot !== null ? /* @__PURE__ */ jsx7(ScreenshotEditor, { image: shot.image, fileName: shot.fileName, onClose: () => setShot(null), onNotice: setNotice }) : null
+    notice !== null ? /* @__PURE__ */ jsx8(Toast, { notice, onDismiss: () => setNotice(null) }) : null,
+    shot !== null ? /* @__PURE__ */ jsx8(ScreenshotEditor, { image: shot.image, fileName: shot.fileName, onClose: () => setShot(null), onNotice: setNotice }) : null
   ] });
   return createPortal(overlay, document.body);
+}
+function viewportSize() {
+  return typeof window === "undefined" ? { width: 1280, height: 800 } : { width: window.innerWidth, height: window.innerHeight };
 }
 function pickTarget(target) {
   if (target instanceof SVGElement && !(target instanceof SVGSVGElement)) return target.closest("svg") ?? target;
@@ -4007,7 +4716,7 @@ function liveElement(item) {
     return null;
   }
 }
-function newId() {
+function newId2() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 function restore(key) {
