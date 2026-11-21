@@ -46,7 +46,7 @@ describe('buildPrompt', () => {
 
   it('gives the agent the comment, the page, and source paths from the repo root', () => {
     const prompt = buildPrompt([annotation], options);
-    expect(prompt).toContain('# UI change requests: backoffice (1 comment)');
+    expect(prompt).toContain('# Change requests: backoffice (1 comment)');
     expect(prompt).toContain('Dev environment http://localhost:5174, recorded 2026-11-20 10:05.');
     expect(prompt).toContain('## 1. Nút này phải màu đỏ\n\n> Nút này phải màu đỏ\n> và rộng hơn');
     expect(prompt).toContain('- **Page:** `/loans/7?tab=docs`, title "Khoản vay"');

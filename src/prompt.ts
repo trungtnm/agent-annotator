@@ -57,7 +57,7 @@ export function buildPrompt(annotations: readonly Annotation[], options: PromptO
   const first = annotations[0]?.targets[0]?.page;
   const origin = first === undefined ? '' : new URL(first.url).origin;
   const lines: string[] = [
-    `# UI change requests: ${options.appName} (${annotations.length} ${annotations.length === 1 ? 'comment' : 'comments'})`,
+    `# Change requests: ${options.appName} (${annotations.length} ${annotations.length === 1 ? 'comment' : 'comments'})`,
     '',
     `Dev environment ${origin}, recorded ${formatTime(options.now)}.` +
       (options.appDir ? ` The app lives in \`${options.appDir}\`; file paths are from the repo root.` : ''),
