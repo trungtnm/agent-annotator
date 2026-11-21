@@ -1,6 +1,6 @@
-# UI change requests: lumen (3 comments)
+# Change requests: lumen (4 comments)
 
-Dev environment http://localhost:5199, recorded 2026-11-21 02:00. The app lives in `examples/demo`; file paths are from the repo root.
+Dev environment http://localhost:5199, recorded 2026-11-21 13:25. The app lives in `examples/demo`; file paths are from the repo root.
 
 Work through the comments below one by one. Each names the selected element, where its JSX is in the source, the components around it, and their props/state when the comment was made. The element's JSX location is exact; a component's "rendered at" location may point at an earlier render branch when React reused the component, so check it against the code. Open the source file before editing. If the line numbers have drifted, search by selector, element text and component name. Personal data has been replaced with `[redacted]`; never treat it as a real value. When done, summarise the changes by comment number.
 
@@ -16,7 +16,7 @@ Work through the comments below one by one. Each names the selected element, whe
 - **Section:** Good morning, Jamie
 - **Selector:** `#root > div > main > header > div:nth-of-type(2) > button`
 - **Element JSX:** `examples/demo/src/components/Header.tsx:17:9`
-- **Components, nearest first:** `Header` (rendered at `examples/demo/src/App.tsx:14:9`) ← `App` (rendered at `examples/demo/src/main.tsx:19:5`)
+- **Components, nearest first:** `Header` (rendered at `examples/demo/src/App.tsx:30:7`) ← `Dashboard` (rendered at `examples/demo/src/App.tsx:22:63`) ← `App` (rendered at `examples/demo/src/main.tsx:19:5`)
 - **Position:** 104×39 at (1300, 45); viewport 1440×900 @1x
 - **Current style:** display: block; width: 104.328px; height: 39px; padding: 10px 16px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; font-weight: 600; color: rgb(110, 109, 133); border: 1px solid rgb(235, 234, 243); border-radius: 12px
 
@@ -37,10 +37,21 @@ Work through the comments below one by one. Each names the selected element, whe
 - **Section:** Good morning, Jamie
 - **Nearby:** before: "Lumen Overview Orders Products Customers Analytics Settings … (+24 chars)" · after: ""
 - **Selector:** `#root > div > main`
-- **Element JSX:** `examples/demo/src/App.tsx:13:7`
+- **Element JSX:** `examples/demo/src/App.tsx:22:7`
 - **Components, nearest first:** `App` (rendered at `examples/demo/src/main.tsx:19:5`)
 - **Position:** 1208×1127 at (232, 0); viewport 1440×900 @1x
 - **Current style:** display: flex; width: 1208px; height: 1127px; padding: 30px 36px 40px; gap: 22px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px; font-weight: 400; color: rgb(23, 23, 43); border: 0px none rgb(23, 23, 43)
+
+**Data of `App`** (state in hook call order):
+
+```json
+{
+  "props": {},
+  "state": [
+    "/"
+  ]
+}
+```
 
 ### 2.2 Inside the area 1
 
@@ -48,8 +59,8 @@ Work through the comments below one by one. Each names the selected element, whe
 - **Section:** Good morning, Jamie
 - **Nearby:** before: "Thursday, November 20 Good morning, Jamie New order" · after: "Revenue Last 14 days 14d 30d 90d New Lumen Pro Automated res… (+75 chars)"
 - **Selector:** `#root > div > main > section:nth-of-type(1)`
-- **Element JSX:** `examples/demo/src/App.tsx:15:9`
-- **Components, nearest first:** `App` (rendered at `examples/demo/src/main.tsx:19:5`)
+- **Element JSX:** `examples/demo/src/App.tsx:31:7`
+- **Components, nearest first:** `Dashboard` (rendered at `examples/demo/src/App.tsx:22:63`) ← `App` (rendered at `examples/demo/src/main.tsx:19:5`)
 - **Position:** 1136×148 at (268, 108); viewport 1440×900 @1x
 - **Current style:** display: grid; width: 1136px; height: 148px; gap: 16px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px; font-weight: 400; color: rgb(23, 23, 43); border: 0px none rgb(23, 23, 43)
 
@@ -66,6 +77,128 @@ Work through the comments below one by one. Each names the selected element, whe
 - **Nearby:** before: "Paid" · after: ""
 - **Selector:** `main > article > table > tbody > tr:nth-of-type(1) > td:nth-of-type(6)`
 - **Element JSX:** `examples/demo/src/components/OrdersTable.tsx:52:15`
-- **Components, nearest first:** `OrdersTable` (rendered at `examples/demo/src/App.tsx:24:9`) ← `App` (rendered at `examples/demo/src/main.tsx:19:5`)
+- **Components, nearest first:** `OrdersTable` (rendered at `examples/demo/src/App.tsx:40:7`) ← `Dashboard` (rendered at `examples/demo/src/App.tsx:22:63`) ← `App` (rendered at `examples/demo/src/main.tsx:19:5`)
 - **Position:** 126×57 at (1255, 725); viewport 1440×900 @1x
 - **Current style:** display: table-cell; width: 126.062px; height: 57px; padding: 12px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; font-weight: 600; color: rgb(23, 23, 43)
+
+---
+
+## 4. Store phone numbers in E.164 and validate them per country on save
+
+> Store phone numbers in E.164 and validate them per country on save
+
+- **Page:** `/customers`, title "Lumen · Customers"
+- **Element:** `<td class="mono">`, text "[redacted]"
+- **Role (a11y):** cell "[redacted]"
+- **Section:** Customers
+- **Nearby:** before: "US Olivia Johnson [redacted]" · after: "SSN [redacted]"
+- **Selector:** `section > article:nth-of-type(1) > table > tbody > tr:nth-of-type(3) > td:nth-of-type(3)`
+- **Element JSX:** `examples/demo/src/pages/CustomersPage.tsx:88:7`
+- **Components, nearest first:** `CustomerRow` (rendered at `examples/demo/src/pages/CustomersPage.tsx:61:13`) ← `CustomerTable` (rendered at `examples/demo/src/pages/CustomersPage.tsx:29:9`) ← `CustomersPage` (rendered at `examples/demo/src/App.tsx:22:43`) ← `App` (rendered at `examples/demo/src/main.tsx:19:5`)
+- **Position:** 141×57 at (610, 350); viewport 1440×900 @1x
+- **Current style:** display: table-cell; width: 141.406px; height: 57px; padding: 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; font-weight: 400; color: rgb(110, 109, 133); white-space: nowrap
+
+**Data of `CustomerRow`** (state in hook call order):
+
+```json
+{
+  "props": {
+    "customer": {
+      "memberId": "CUS-100302",
+      "fullName": "[redacted]",
+      "country": "US",
+      "email": "[redacted]",
+      "phone": "[redacted]",
+      "nationalId": "[redacted]",
+      "address": "[redacted]",
+      "dateOfBirth": "[redacted]",
+      "orders": 21,
+      "lifetimeValue": 3412.75,
+      "note": "Call [redacted] before delivery. Tax form on file, SSN [redacted]."
+    },
+    "selected": false,
+    "onSelect": "ƒ onSelect()"
+  },
+  "state": []
+}
+```
+
+**Data of `CustomerTable`** (state in hook call order):
+
+```json
+{
+  "props": {
+    "customers": [
+      {
+        "memberId": "CUS-100231",
+        "fullName": "[redacted]",
+        "country": "VN",
+        "email": "[redacted]",
+        "phone": "[redacted]",
+        "nationalId": "[redacted]",
+        "address": "[redacted]",
+        "dateOfBirth": "[redacted]",
+        "orders": 14,
+        "lifetimeValue": 1820.5,
+        "note": "Gọi [redacted] sau 17h. CCCD [redacted] đã xác minh."
+      },
+      {
+        "memberId": "CUS-100245",
+        "fullName": "[redacted]",
+        "country": "VN",
+        "email": "[redacted]",
+        "phone": "[redacted]",
+        "nationalId": "[redacted]",
+        "address": "[redacted]",
+        "dateOfBirth": "[redacted]",
+        "orders": 6,
+        "lifetimeValue": 640,
+        "note": "Prefers Zalo: [redacted]. Refund of 1.250.000 đ sent."
+      },
+      {
+        "memberId": "CUS-100302",
+        "fullName": "[redacted]",
+        "country": "US",
+        "email": "[redacted]",
+        "phone": "[redacted]",
+        "nationalId": "[redacted]",
+        "address": "[redacted]",
+        "dateOfBirth": "[redacted]",
+        "orders": 21,
+        "lifetimeValue": 3412.75,
+        "note": "Call [redacted] before delivery. Tax form on file, SSN [redacted]."
+      },
+      {
+        "memberId": "CUS-100318",
+        "fullName": "[redacted]",
+        "country": "US",
+        "email": "[redacted]",
+        "phone": "[redacted]",
+        "nationalId": "[redacted]",
+        "address": "[redacted]",
+        "dateOfBirth": "[redacted]",
+        "orders": 3,
+        "lifetimeValue": 289,
+        "note": "Gift order; text [redacted]. Budget 2500000000 cents is a typo."
+      },
+      {
+        "memberId": "CUS-100407",
+        "fullName": "[redacted]",
+        "country": "SG",
+        "email": "[redacted]",
+        "phone": "[redacted]",
+        "nationalId": "[redacted]",
+        "address": "[redacted]",
+        "dateOfBirth": "[redacted]",
+        "orders": 9,
+        "lifetimeValue": 1175.4,
+        "note": "NRIC S8812345D checked. WhatsApp +65 9123 4567 only."
+      },
+      "… +1"
+    ],
+    "selectedId": "CUS-100231",
+    "onSelect": "ƒ bound dispatchSetState()"
+  },
+  "state": []
+}
+```

@@ -81,16 +81,19 @@ const at = (fragment) => {
 const cuts = [
   [at('Click anything') + 2.6, 5.4],
   [at('See every comment') + 0.4, 2.6],
+  [at('another page') + 0.2, 3.2],
+  [at('Redact personal data') + 0.4, 4.6],
+  [at('One list, every page') + 0.1, 1.8],
   [at('Paste it') + 0.3, 3.6],
   [at('Need a picture') + 1.2, 8.4],
 ];
 const parts = cuts.map(([start, length], index) => `[0:v]trim=start=${start.toFixed(2)}:duration=${length},setpts=PTS-STARTPTS[p${index}]`);
 const joined = `${cuts.map((_, index) => `[p${index}]`).join('')}concat=n=${cuts.length}:v=1:a=0[loop]`;
-const look = 'fps=12,scale=960:-1:flags=lanczos';
+const look = 'fps=10,scale=960:-1:flags=lanczos';
 ffmpeg(
   '-i', `${WORK}walk.mp4`,
   '-filter_complex',
-  `${parts.join(';')};${joined};[loop]${look},split[x][y];[x]palettegen=max_colors=160:stats_mode=diff[pal];[y][pal]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle`,
+  `${parts.join(';')};${joined};[loop]${look},split[x][y];[x]palettegen=max_colors=128:stats_mode=diff[pal];[y][pal]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle`,
   '-loop', '0',
   `${OUT}hero.gif`,
 );

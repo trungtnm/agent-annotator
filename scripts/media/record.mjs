@@ -34,14 +34,14 @@ function pageKit() {
       border: 2px solid rgba(109,74,255,.9); opacity: 0; transform: scale(.4); }
     #__cursor.down .ring { animation: __ripple .45s ease-out; }
     @keyframes __ripple { 0% { opacity: .9; transform: scale(.4); } 100% { opacity: 0; transform: scale(1.6); } }
-    #__caption { position: fixed; left: 50%; bottom: 84px; z-index: 2147483646; pointer-events: none;
-      transform: translate(-50%, 20px); opacity: 0; transition: opacity .35s ease, transform .35s ease;
-      display: flex; align-items: center; gap: 12px; padding: 12px 20px 12px 12px; border-radius: 999px;
-      background: rgba(18,17,36,.92); color: #fff; font: 600 17px/1.2 Inter, system-ui, sans-serif;
+    #__caption { position: fixed; left: 256px; bottom: 104px; z-index: 2147483646; pointer-events: none;
+      transform: translateY(20px); opacity: 0; transition: opacity .35s ease, transform .35s ease;
+      display: flex; align-items: center; gap: 16px; padding: 16px 30px 16px 16px; border-radius: 999px;
+      background: rgba(18,17,36,.92); color: #fff; font: 600 24px/1.2 Inter, system-ui, sans-serif;
       box-shadow: 0 12px 40px rgba(18,17,36,.35); backdrop-filter: blur(8px); white-space: nowrap; }
-    #__caption.on { opacity: 1; transform: translate(-50%, 0); }
-    #__caption .step { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
-      background: linear-gradient(135deg, #ff6cab, #6d4aff); font-size: 14px; }
+    #__caption.on { opacity: 1; transform: none; }
+    #__caption .step { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
+      background: linear-gradient(135deg, #ff6cab, #6d4aff); font-size: 21px; }
     #__agent { position: fixed; inset: 0; z-index: 2147483645; display: grid; place-items: center;
       background: rgba(12,11,26,.55); backdrop-filter: blur(6px); opacity: 0; transition: opacity .4s; }
     #__agent.on { opacity: 1; }
@@ -103,7 +103,17 @@ function pageKit() {
 
   window.__showPrompt = (prompt) => {
     const escape = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const lines = prompt.split('\n').slice(0, 60).map((line) => {
+    // Data blocks cut to their first lines, so every comment, from every page, gets on screen.
+    const kept = [];
+    let fenced = 0;
+    for (const line of prompt.split('\n')) {
+      if (line.startsWith('```')) {
+        if (fenced > 7) kept.push('  …');
+        fenced = fenced === 0 ? 1 : 0;
+        kept.push(line);
+      } else if (fenced === 0 || fenced++ <= 7) kept.push(line);
+    }
+    const lines = kept.slice(0, 160).map((line) => {
       const safe = escape(line);
       if (/^#{1,3} /.test(line)) return `<span class="h">${safe}</span>`;
       if (/^> /.test(line)) return `<span class="q">${safe}</span>`;
@@ -265,23 +275,74 @@ await click(await centre(button('Show comments in full')));
 await wait(2200);
 await shot('comments');
 
-// 4 · copy prompt, paste into the agent
-await caption(4, 'Copy one prompt: files, lines, components, data');
+// 4 · another page: the comments come along, and the prompt will cover both pages
+await click(await centre(button('Show comments as numbers')));
+await wait(500);
+await caption(4, 'Keep going on another page: Alt+click to navigate');
+await moveTo(await centre(page.getByRole('link', { name: 'Customers' })));
+await page.keyboard.down('Alt');
+await click(await centre(page.getByRole('link', { name: 'Customers' })));
+await page.keyboard.up('Alt');
+await page.getByRole('heading', { name: 'Customers', level: 1 }).waitFor();
+await wait(1400);
+
+// 5 · personal data: choose what is screened before commenting on a page full of it
+await caption(5, 'Redact personal data: pick countries, add patterns');
+await click(await centre(button('Redaction settings')));
+await wait(800);
+await click(await centre(page.getByRole('checkbox', { name: /United States/ })));
+await wait(500);
+await click(await centre(page.getByRole('textbox', { name: /regular expression/ })));
+await type('ACCT-\\d{8}');
+await wait(900);
+const settings = await page.getByRole('dialog', { name: 'Redaction settings' }).boundingBox();
+await shot('redaction', { x: settings.x - 24, y: settings.y - 24, width: W - settings.x + 24, height: H - settings.y + 24 });
+await click(await centre(button('Close redaction settings')));
+await wait(500);
+await click(await centre(page.locator('tr', { hasText: 'Olivia Johnson' }).locator('td').nth(2)));
+await wait(600);
+await type('Store phone numbers in E.164 and validate them per country on save');
+await wait(300);
+await page.keyboard.press(`${MOD}+Enter`);
+await wait(900);
+await caption(5, 'One list, every page: comments from earlier pages stay');
+await wait(1600);
+const list = await page.getByLabel('Comment list', { exact: true }).boundingBox();
+await shot('pages', { x: list.x - 24, y: list.y - 24, width: W - list.x + 24, height: H - list.y + 24 });
+await click(await centre(button('Hide list')));
+await wait(400);
+
+// 6 · copy prompt, paste into the agent
+await caption(6, 'Copy one prompt: files, lines, components, data');
 await click(await centre(page.getByRole('button', { name: 'Copy prompt' })));
 await wait(1600);
 const prompt = await page.evaluate(() => navigator.clipboard.readText());
 await writeFile(`${OUT}sample-prompt.md`, prompt);
-await caption(4, 'Paste it into Claude Code, Codex or Cursor');
+await caption(6, 'Paste it into Claude Code, Codex or Cursor');
 await page.evaluate((text) => window.__showPrompt(text), prompt);
 await wait(VIDEO ? 9500 : 1200);
 await shot('prompt');
+if (!VIDEO) {
+  // The same prompt further down: the comment from the second page, its data redacted.
+  await page.evaluate(() => {
+    const scroll = document.querySelector('#__agent .scroll');
+    const heading = [...scroll.querySelectorAll('.h')].find((line) => line.textContent.startsWith('## 4.'));
+    scroll.style.animation = 'none';
+    scroll.style.transform = `translateY(${12 - (heading.getBoundingClientRect().top - scroll.getBoundingClientRect().top)}px)`;
+  });
+  await wait(300);
+  await shot('prompt-pages');
+}
 await page.evaluate(() => window.__hidePrompt());
 await wait(400);
 
-// 5 · screenshot + markup
-await caption(5, 'Need a picture? Capture and mark it up');
-await click(await centre(button('Show comments as numbers')));
-await wait(500);
+// 7 · screenshot + markup, back on the dashboard
+await page.keyboard.down('Alt');
+await click(await centre(page.getByRole('link', { name: 'Orders' })));
+await page.keyboard.up('Alt');
+await page.getByText('Good morning, Jamie').waitFor();
+await wait(600);
+await caption(7, 'Need a picture? Capture and mark it up');
 await click(await centre(button('Screenshot')));
 await page.getByRole('dialog', { name: 'Screenshot editor' }).waitFor();
 await wait(900);
@@ -315,7 +376,7 @@ const total = await centre(page.getByText('$129.00'));
 await drag(ed({ x: total.x - 300, y: total.y + 100 }), ed({ x: total.x - 40, y: total.y + 8 }));
 await wait(600);
 
-await caption(5, 'Pixelate personal data before it leaves your machine');
+await caption(7, 'Pixelate personal data before it leaves your machine');
 await page.keyboard.press('b');
 ed = await editorMap();
 // Only the emails on screen: the capture is the viewport.
@@ -335,7 +396,7 @@ await wait(900);
 await moveTo({ x: W - 300, y: 120 });
 await shot('editor');
 await page.keyboard.press(`${MOD}+c`);
-await caption(5, 'Copy or save the PNG');
+await caption(7, 'Copy or save the PNG');
 await wait(1800);
 await caption(null, null);
 await wait(600);

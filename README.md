@@ -14,9 +14,9 @@ component chain and the live props: no more "the button, top right, the grey one
 ![Next.js and Vite](https://img.shields.io/badge/works%20with-Next.js%20%C2%B7%20Vite-6d4aff)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-<img src="docs/media/hero.gif" alt="Commenting on a dashboard, copying the prompt, and marking up a screenshot" width="860" />
+<img src="docs/media/hero.gif" alt="Commenting on a dashboard, carrying on on a second page with personal data redacted, copying the prompt, and marking up a screenshot" width="860" />
 
-<sub>▶ <a href="docs/media/demo.mp4">Watch the 70-second walkthrough</a></sub>
+<sub>▶ <a href="docs/media/demo.mp4">Watch the 100-second walkthrough</a></sub>
 
 </div>
 
@@ -34,7 +34,7 @@ agent-annotator closes that gap from where you already are, the running app:
 | 🧩 **Context an agent can act on** | Component chain, role and accessible name, selector, styles, and a snapshot of the nearest components' props and state. |
 | 📝 **One prompt for many comments** | Comment on ten things across five pages, then paste once. The prompt tells the agent how to work through them. |
 | 🖼️ **Screenshots that explain themselves** | Capture the tab with every comment drawn in, then add callouts, arrows, rulers, crop, and pixelate in a Shottr-style editor. |
-| 🔒 **Stays on your machine** | Personal data is redacted; the prompt and the image go to your clipboard or disk; nothing is sent anywhere. Not in your production bundle. |
+| 🔒 **Stays on your machine** | Personal data is redacted, with country formats and your own patterns; the prompt and the image go to your clipboard or disk; nothing is sent anywhere. Not in your production bundle. |
 
 ## Quick start
 
@@ -82,7 +82,7 @@ Start your dev server, press **Alt+Shift+C**, click something.
 Everything lives in one toolbar, bottom right, which folds into a single button when you need the
 space:
 
-<img src="docs/media/toolbar.png" alt="The toolbar: comment mode, pause, show comments, screenshot, list, copy prompt" width="430" />
+<img src="docs/media/toolbar.png" alt="The toolbar: comment mode, pause, show comments, screenshot, redaction settings, list, copy prompt" width="430" />
 
 ### 1. Click anything and say what should change
 
@@ -96,19 +96,40 @@ page, so you can open the menu you want to comment on.
 
 <img src="docs/media/comments.png" alt="Three comments drawn next to their elements" width="860" />
 
-Comments stay on their elements as you scroll and survive navigation and reloads. Show them as
-numbered pins or in full; the list in the toolbar holds every comment, from this page and others.
+Comments stay on their elements as you scroll. Show them as numbered pins or in full.
 
-### 3. Copy one prompt and paste it into your agent
+### 3. Keep going across pages
+
+<img src="docs/media/pages.png" alt="The comment list on the Customers page, with three comments marked other page" width="380" />
+
+One request often spans several screens. Navigate as you normally would (**Alt**+click a link
+while comment mode is on), and keep commenting. Comments survive client-side navigation and
+full reloads. Each pin shows only on the page it was made on, and the list marks the rest
+**other page**. The copied prompt covers every page and names each comment's path, so the
+agent knows that comment 4 is about `/customers` and comment 1 about `/`.
+
+### 4. Keep personal data out of the prompt
+
+<img src="docs/media/redaction.png" alt="Redaction settings: an on/off switch, Vietnam, United States and Singapore number formats, and a box for your own patterns" width="380" />
+
+Dev databases are often full of copied customer data, and the prompt goes to an AI service.
+The props, state and page text in each comment are screened as it is made. Values under keys
+like `phone`, `email`, `address` or `token` become `[redacted]`, and so do e-mail addresses
+and phone and ID numbers inside any text. The **shield** button opens the settings. There
+you choose which countries' formats to catch (**Vietnam**, the **United States**,
+**Singapore**), add your own regular expressions, or switch redaction off. The `redaction`
+prop sets the defaults for your team. [Redaction guide →](docs/redaction.md)
+
+### 5. Copy one prompt and paste it into your agent
 
 <img src="docs/media/prompt.png" alt="The copied prompt in a coding agent" width="860" />
 
-Per comment: the page, the element and its text, its role, the section it sits in, a selector,
+Per comment, from every page: the page, the element and its text, its role, the section it sits in, a selector,
 the **JSX file:line**, the component chain with where each one is rendered, its current styles,
-and props/state with personal data replaced by `[redacted]`.
+and props/state with personal data replaced by `[redacted]` ([redaction settings](docs/redaction.md)).
 [See a full prompt →](docs/prompt-format.md)
 
-### 4. Capture and mark up
+### 6. Capture and mark up
 
 <img src="docs/media/editor.png" alt="Screenshot editor with a callout, an arrow, a ruler and pixelated emails" width="860" />
 
@@ -145,6 +166,7 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 |---|---|---|
 | `appName` | required | Names the app in the prompt and the screenshot file, and keys the saved comments. |
 | `appDir` | optional | The app's folder from the repo root (`apps/web`), so prompt paths open from the root in a monorepo. |
+| `redaction` | optional | Default redaction settings: `{ enabled, countries, patterns }`. See [Redaction](docs/redaction.md). |
 | `resolveFrames` | optional | Replace how stack frames are mapped to source; see `createNextResolver`. |
 | `captureScreen` | optional | Replace how the tab is captured (tests, automation). |
 
@@ -152,10 +174,14 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 
 - Values under keys that name personal data (phone, email, name, address, national ID, bank
   account, password, token and similar) are replaced with `[redacted]` before they reach the
-  prompt, and so is text that looks like an email address, a Vietnamese phone number or a
-  12-digit Vietnamese citizen ID. Patterns for other countries are welcome.
-- The element you click keeps its visible text: it is what you pointed at. Untick
-  **Include props/state** to leave data out entirely, and pixelate screenshots before sharing.
+  prompt, and so is any text that looks like an email address.
+- Phone and ID formats are screened for the countries you pick: **Vietnam** (the default),
+  the **United States** and **Singapore**. You can also add your own regular expressions, or
+  switch redaction off. Use the shield button on the toolbar, or the `redaction` prop for
+  app-wide defaults. [Redaction guide →](docs/redaction.md)
+- Settings apply to comments made from then on, and the prompt names any comment recorded
+  with redaction off.
+- Untick **Include props/state** to leave data out entirely, and pixelate screenshots before sharing.
 - Nothing is uploaded. Comments live in `sessionStorage`; preferences in `localStorage`.
 
 ## FAQ
@@ -170,6 +196,7 @@ field means and how to work through the comments.
 
 **Can I try it without installing?** Clone the repo and run the demo:
 `pnpm install && pnpm --dir examples/demo install && pnpm --dir examples/demo dev`.
+Its **Customers** page is full of made-up personal data for trying the redaction settings.
 
 ## Develop
 
