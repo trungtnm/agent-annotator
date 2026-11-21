@@ -1,6 +1,6 @@
 {
   "name": "@trungtnm/agent-annotator",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A development-only overlay for React apps: comment on elements, text and areas of the running UI, then copy one Markdown prompt for a coding agent (JSX file:line, component chain and PII-redacted props/state per comment), or capture the tab and mark it up like Shottr.",
   "license": "MIT",
   "author": "trungtnm",

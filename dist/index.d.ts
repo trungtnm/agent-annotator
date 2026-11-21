@@ -1,6 +1,44 @@
 import { ReactNode } from 'react';
 
 /**
+ * What counts as personal data, and the switch that turns screening off. The prompt is
+ * pasted into an AI agent, so whatever gets through leaves the machine: a dev database can
+ * still hold a copy of real customer data.
+ *
+ * Two independent screens:
+ * - by KEY: a property whose name says it holds personal data or a secret is replaced
+ *   whole, whatever its value;
+ * - by VALUE: inside every string, an e-mail address, the number formats of the selected
+ *   countries and the user's own patterns are replaced where they stand, so text that
+ *   merely mentions one (an element's label, a free-text note) is screened too.
+ *
+ * Amounts survive on purpose: they are what a UI bug is usually about. Every built-in
+ * number pattern needs a shape no money figure has (a leading 0 or country code, a
+ * separator, letters around the digits).
+ */
+declare const REDACTED = "[redacted]";
+type RedactionCountry = 'vn' | 'us' | 'sg';
+interface RedactionSettings {
+    /** Off: props, state and page text go into the prompt as they are. */
+    readonly enabled: boolean;
+    /** Whose phone and ID formats are screened by value; e-mail addresses always are. */
+    readonly countries: readonly RedactionCountry[];
+    /**
+     * Extra value patterns, as regular expression sources (`INV-\d{6}`) or literals with
+     * flags (`/acct[0-9]+/i`). Every match is replaced; blank and invalid lines are skipped.
+     */
+    readonly patterns: readonly string[];
+}
+/** What `DevAnnotator`'s `redaction` prop takes: any field left out keeps its default. */
+interface RedactionOptions {
+    readonly enabled?: boolean;
+    readonly countries?: readonly RedactionCountry[];
+    readonly patterns?: ReadonlyArray<string | RegExp>;
+}
+declare const COUNTRIES: RedactionCountry[];
+declare const DEFAULT_REDACTION: RedactionSettings;
+
+/**
  * Taking the screenshot, and getting it out of the browser.
  *
  * The capture is the tab itself, through the Screen Capture API: the browser asks once
@@ -58,6 +96,12 @@ interface DevAnnotatorProps {
     readonly appName: string;
     /** The app's directory from the repo root, so source paths in the prompt open as-is. */
     readonly appDir?: string;
+    /**
+     * Personal-data redaction for this app: on or off, which countries' phone and ID
+     * formats to screen, and extra patterns. Each browser can change it from the toolbar's
+     * redaction settings; these are the defaults it starts from and resets to.
+     */
+    readonly redaction?: RedactionOptions;
     /** Overrides how stack frames are mapped to source; tests pass one, apps never do. */
     readonly resolveFrames?: FrameResolver;
     /** Overrides how the tab is captured; tests pass one, apps never do. */
@@ -124,7 +168,7 @@ interface ElementCapture {
         readonly name: string;
         readonly renderedAt: SourceLocation | null;
     }>;
-    /** Props and stateful hooks of the nearest components, PII redacted. */
+    /** Props and stateful hooks of the nearest components, personal data redacted unless redaction is off. */
     readonly data: ReadonlyArray<{
         readonly component: string;
         readonly props: Snapshot;
@@ -163,6 +207,11 @@ interface Annotation {
      * drawn back over the page after scrolling or a reload. Not part of the prompt.
      */
     readonly areaInContainer?: Rect;
+    /**
+     * `false` when the comment was made with redaction switched off, so its captures hold
+     * the page's data as it was. Comments saved before the setting existed were screened.
+     */
+    readonly redacted?: boolean;
 }
 interface PromptOptions {
     /** Shown in the heading: which app the comments are about. */
@@ -180,4 +229,4 @@ interface PromptOptions {
  */
 declare function buildPrompt(annotations: readonly Annotation[], options: PromptOptions): string;
 
-export { type Annotation, DevAnnotator, type DevAnnotatorProps, type ElementCapture, type FrameResolver, type PromptOptions, type ScreenCapture, type SourceLocation, buildPrompt, createNextResolver };
+export { type Annotation, COUNTRIES, DEFAULT_REDACTION, DevAnnotator, type DevAnnotatorProps, type ElementCapture, type FrameResolver, type PromptOptions, REDACTED, type RedactionCountry, type RedactionOptions, type RedactionSettings, type ScreenCapture, type SourceLocation, buildPrompt, createNextResolver };

@@ -1,32 +1,125 @@
 'use client';
 
 // src/annotator.tsx
-import { useCallback, useEffect as useEffect3, useRef as useRef3, useState as useState3 } from "react";
+import { useCallback, useEffect as useEffect3, useMemo, useRef as useRef3, useState as useState3 } from "react";
 import { createPortal } from "react-dom";
 
-// src/serialize.ts
+// src/redaction.ts
 var REDACTED = "[redacted]";
-var PII_KEY = /(nationalid|cccd|cmnd|citizenid|identitynumber|idnumber|idcard|passport|phone|mobile|msisdn|zalo|email|fullname|(debtor|borrower|customer|guarantor|contact|person|holder|relative|spouse|recipient|payer)name|address|dob|dateofbirth|birthday|birthdate|bankaccount|accountnumber|cardnumber|password|passwd|secret|token|otp|apikey|authorization|cookie|signature)/;
-var PII_VALUE = [
-  /[^\s@<>()[\]"']+@[^\s@<>()[\]"']+\.[a-z]{2,}/gi,
-  // +84 or 0, then 9–10 digits, optionally grouped by spaces or dots.
-  /(?<!\d)(?:\+?84|0)(?:[\s.]?\d){9,10}(?!\d)/g,
-  // CCCD: 12 digits, starting with the 0 of a province code.
-  /(?<!\d)0\d{11}(?!\d)/g
-];
-function isPiiKey(key) {
-  return PII_KEY.test(key.toLowerCase().replace(/[\s_-]/g, ""));
+var COUNTRY_RULES = {
+  vn: {
+    label: "Vietnam",
+    covers: "phone numbers, 12-digit citizen IDs (CCCD)",
+    keys: [/cccd|cmnd|zalo/],
+    values: [
+      // +84 or 0, then 9–10 digits, optionally grouped by spaces or dots.
+      /(?<!\d)(?:\+?84|0)(?:[\s.]?\d){9,10}(?!\d)/g,
+      // CCCD: 12 digits, starting with the 0 of a province code.
+      /(?<!\d)0\d{11}(?!\d)/g
+    ]
+  },
+  us: {
+    label: "United States",
+    covers: "phone numbers, Social Security numbers written with dashes",
+    // `ssn` only at either end of the key: in the middle it is "claSSName".
+    keys: [/^ssn|ssn$|socialsecurity/],
+    values: [
+      // SSN with its dashes, minus the ranges never issued.
+      /(?<!\d)(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?!\d)/g,
+      // NANP: optional +1, area code and exchange each starting 2–9, then 4 digits.
+      /(?<![\d+])(?:\+1[\s.-]?)?(?:\([2-9]\d{2}\)\s?|[2-9]\d{2}[\s.-]?)[2-9]\d{2}[\s.-]?\d{4}(?!\d)/g
+    ]
+  },
+  sg: {
+    label: "Singapore",
+    covers: "phone numbers with +65 or a space or dash, NRIC/FIN numbers",
+    keys: [/nric/],
+    values: [
+      /\b[STFGM]\d{7}[A-Z]\b/g,
+      // 8 digits starting 3, 6, 8 or 9: with +65, or split 4-4, so a bare amount survives.
+      /(?<!\d)(?:\+65[\s-]?[3689]\d{3}[\s-]?\d{4}|[3689]\d{3}[\s-]\d{4})(?!\d)/g
+    ]
+  }
+};
+var COUNTRIES = Object.keys(COUNTRY_RULES);
+var DEFAULT_REDACTION = { enabled: true, countries: ["vn"], patterns: [] };
+var SHARED_KEY = /(nationalid|citizenid|identitynumber|idnumber|idcard|passport|phone|mobile|msisdn|email|fullname|(debtor|borrower|customer|guarantor|contact|person|holder|relative|spouse|recipient|payer)name|address|dob|dateofbirth|birthday|birthdate|bankaccount|accountnumber|cardnumber|password|passwd|secret|token|otp|apikey|authorization|cookie|signature)/;
+var EMAIL = /[^\s@<>()[\]"']+@[^\s@<>()[\]"']+\.[a-z]{2,}/gi;
+function createRedactor(settings) {
+  if (!settings.enabled) return { enabled: false, isPiiKey: () => false, text: (text) => text };
+  const rules = settings.countries.map((country) => COUNTRY_RULES[country]);
+  const keys = [SHARED_KEY, ...rules.flatMap((rule) => rule.keys)];
+  const values = [
+    EMAIL,
+    ...rules.flatMap((rule) => rule.values),
+    ...settings.patterns.filter((source) => source.trim() !== "").map((source) => compilePattern(source)).filter((pattern) => pattern instanceof RegExp)
+  ];
+  return {
+    enabled: true,
+    isPiiKey: (key) => {
+      const normalised = key.toLowerCase().replace(/[\s_-]/g, "");
+      return keys.some((pattern) => pattern.test(normalised));
+    },
+    text: (text) => values.reduce((out, pattern) => out.replace(pattern, REDACTED), text)
+  };
 }
-function redactText(text) {
-  return PII_VALUE.reduce((out, pattern) => out.replace(pattern, REDACTED), text);
+var DEFAULT_REDACTOR = createRedactor(DEFAULT_REDACTION);
+function compilePattern(source) {
+  const literal = /^\/(.+)\/([a-z]*)$/s.exec(source);
+  const body = literal?.[1] ?? source;
+  const flags = new Set(literal?.[2] ?? "");
+  flags.add("g");
+  let pattern;
+  try {
+    pattern = new RegExp(body, [...flags].join(""));
+  } catch (error) {
+    return error instanceof Error ? error.message : "Invalid pattern";
+  }
+  if (pattern.test("")) return "Matches empty text";
+  pattern.lastIndex = 0;
+  return pattern;
 }
+function resolveRedaction(options) {
+  return {
+    enabled: options?.enabled ?? DEFAULT_REDACTION.enabled,
+    countries: (options?.countries ?? DEFAULT_REDACTION.countries).filter((country) => country in COUNTRY_RULES),
+    patterns: (options?.patterns ?? DEFAULT_REDACTION.patterns).map(
+      (pattern) => typeof pattern === "string" ? pattern : `/${pattern.source}/${pattern.flags.replace("g", "")}`
+    )
+  };
+}
+function readRedaction(key) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return null;
+    const value = JSON.parse(raw);
+    if (typeof value.enabled !== "boolean" || !Array.isArray(value.countries) || !Array.isArray(value.patterns)) return null;
+    return {
+      enabled: value.enabled,
+      countries: value.countries.filter((country) => typeof country === "string" && country in COUNTRY_RULES),
+      patterns: value.patterns.filter((pattern) => typeof pattern === "string")
+    };
+  } catch {
+    return null;
+  }
+}
+function writeRedaction(key, settings) {
+  try {
+    if (settings === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify(settings));
+  } catch {
+  }
+}
+
+// src/serialize.ts
 var DEFAULT_LIMITS = { depth: 4, keys: 25, items: 5, string: 160 };
 var SKIPPED_KEYS = /* @__PURE__ */ new Set(["children", "ref", "key", "$$typeof", "_owner", "_store"]);
 var REACT_ELEMENT_TYPES = /* @__PURE__ */ new Set([/* @__PURE__ */ Symbol.for("react.transitional.element"), /* @__PURE__ */ Symbol.for("react.element")]);
-function toSnapshot(value, limits = DEFAULT_LIMITS) {
-  return walk(value, 0, limits, /* @__PURE__ */ new Set());
+function toSnapshot(value, limits = DEFAULT_LIMITS, redactor = DEFAULT_REDACTOR) {
+  return walk(value, 0, { limits, redactor }, /* @__PURE__ */ new Set());
 }
-function walk(value, depth, limits, path) {
+function walk(value, depth, walker, path) {
+  const { limits, redactor } = walker;
   switch (typeof value) {
     case "undefined":
       return "<undefined>";
@@ -37,7 +130,7 @@ function walk(value, depth, limits, path) {
     case "bigint":
       return `${value}n`;
     case "string":
-      return truncate(redactText(value), limits.string);
+      return truncate(redactor.text(value), limits.string);
     case "symbol":
       return value.toString();
     case "function":
@@ -48,12 +141,12 @@ function walk(value, depth, limits, path) {
   if (value === null) return null;
   const object = value;
   if (path.has(object)) return "<circular>";
-  const summary = summarise(object);
+  const summary = summarise(object, redactor);
   if (summary !== null) return summary;
   path.add(object);
   try {
-    if (Array.isArray(object)) return walkList(object, object.length, depth, limits, path);
-    if (object instanceof Set) return { "<Set>": walkList([...object], object.size, depth, limits, path) };
+    if (Array.isArray(object)) return walkList(object, object.length, depth, walker, path);
+    if (object instanceof Set) return { "<Set>": walkList([...object], object.size, depth, walker, path) };
     if (object instanceof Map) {
       if (depth >= limits.depth) return `<Map(${object.size})>`;
       const entries = {};
@@ -63,23 +156,25 @@ function walk(value, depth, limits, path) {
           entries["\u2026"] = `+${object.size - kept}`;
           break;
         }
-        const name = typeof key === "string" ? key : String(walk(key, limits.depth, limits, path));
-        entries[name] = isPiiKey(name) ? redactWhole(entry) : walk(entry, depth + 1, limits, path);
+        const name = typeof key === "string" ? key : String(walk(key, limits.depth, walker, path));
+        entries[name] = redactor.isPiiKey(name) ? redactWhole(entry) : walk(entry, depth + 1, walker, path);
         kept += 1;
       }
       return { "<Map>": entries };
     }
-    return walkObject(object, depth, limits, path);
+    return walkObject(object, depth, walker, path);
   } finally {
     path.delete(object);
   }
 }
-function walkList(items, size, depth, limits, path) {
+function walkList(items, size, depth, walker, path) {
+  const { limits } = walker;
   if (depth >= limits.depth) return `<Array(${size})>`;
-  const kept = items.slice(0, limits.items).map((item) => walk(item, depth + 1, limits, path));
+  const kept = items.slice(0, limits.items).map((item) => walk(item, depth + 1, walker, path));
   return size > limits.items ? [...kept, `\u2026 +${size - limits.items}`] : kept;
 }
-function walkObject(object, depth, limits, path) {
+function walkObject(object, depth, walker, path) {
+  const { limits, redactor } = walker;
   const keys = Object.keys(object).filter((key) => !SKIPPED_KEYS.has(key) && !key.startsWith("__react"));
   if (depth >= limits.depth) return keys.length === 0 ? {} : `{\u2026${keys.length} keys}`;
   const out = {};
@@ -91,7 +186,7 @@ function walkObject(object, depth, limits, path) {
       out[key] = "<getter threw>";
       continue;
     }
-    out[key] = isPiiKey(key) ? redactWhole(entry) : walk(entry, depth + 1, limits, path);
+    out[key] = redactor.isPiiKey(key) ? redactWhole(entry) : walk(entry, depth + 1, walker, path);
   }
   if (keys.length > limits.keys) out["\u2026"] = `+${keys.length - limits.keys} keys`;
   return out;
@@ -102,12 +197,12 @@ function redactWhole(value) {
   if (value === "") return "";
   return REDACTED;
 }
-function summarise(object) {
+function summarise(object, redactor) {
   if (REACT_ELEMENT_TYPES.has(object.$$typeof)) {
     return `<${typeName(object.type)} />`;
   }
   if (object instanceof Date) return Number.isNaN(object.getTime()) ? "<Invalid Date>" : object.toISOString();
-  if (object instanceof Error) return `<${object.name}: ${truncate(redactText(object.message), 120)}>`;
+  if (object instanceof Error) return `<${object.name}: ${truncate(redactor.text(object.message), 120)}>`;
   if (object instanceof RegExp) return object.toString();
   if (typeof Node !== "undefined" && object instanceof Node) return `<${nodeLabel(object)}>`;
   if (typeof object.then === "function") return "<Promise>";
@@ -204,13 +299,13 @@ function accessibleName(element) {
   if (labels && labels.length > 0) return Array.from(labels, (node) => visibleText(node)).join(" ");
   return element.getAttribute("alt") ?? element.getAttribute("title") ?? visibleText(element);
 }
-function clean(text, max) {
-  return truncate(redactText(text.replace(/\s+/g, " ").trim()), max);
+function clean(text, max, redactor) {
+  return truncate(redactor.text(text.replace(/\s+/g, " ").trim()), max);
 }
-function describeAccessibility(element) {
+function describeAccessibility(element, redactor = DEFAULT_REDACTOR) {
   const role = roleOf(element);
   if (role === null) return null;
-  const name = clean(accessibleName(element), 80);
+  const name = clean(accessibleName(element), 80, redactor);
   const states = [];
   if (element.disabled === true || element.getAttribute("aria-disabled") === "true") {
     states.push("disabled");
@@ -232,24 +327,24 @@ function sectionLabel(section2) {
   const title = section2.querySelector(SECTION_TITLE);
   return title === null ? null : visibleText(title);
 }
-function sectionPath(element) {
+function sectionPath(element, redactor = DEFAULT_REDACTOR) {
   const labels = [];
   for (let current = element.parentElement?.closest(SECTIONS) ?? null; current !== null && labels.length < MAX_SECTIONS; current = current.parentElement?.closest(SECTIONS) ?? null) {
     const label = sectionLabel(current);
-    if (label) labels.unshift(clean(label, 50));
+    if (label) labels.unshift(clean(label, 50, redactor));
   }
   const pageHeading = element.ownerDocument.querySelector("h1");
   if (pageHeading && !pageHeading.contains(element)) {
-    const heading = clean(visibleText(pageHeading), 50);
+    const heading = clean(visibleText(pageHeading), 50, redactor);
     if (heading && labels[0] !== heading) labels.unshift(heading);
   }
   const path = labels.filter((label) => label !== "");
   return path.length === 0 ? null : path.join(" \u203A ");
 }
-function nearbyText(element) {
+function nearbyText(element, redactor = DEFAULT_REDACTOR) {
   const before = visibleText(element.previousElementSibling);
   const after = visibleText(element.nextElementSibling);
-  const parts = [clean(before, 60), clean(after, 60)];
+  const parts = [clean(before, 60, redactor), clean(after, 60, redactor)];
   if (parts[0] === "" && parts[1] === "") return null;
   return `before: "${parts[0]}" \xB7 after: "${parts[1]}"`;
 }
@@ -408,29 +503,29 @@ var DESCRIBED_ATTRIBUTES = [
   "alt",
   ...TEST_ID_ATTRIBUTES
 ];
-function describeElement(element) {
+function describeElement(element, redactor = DEFAULT_REDACTOR) {
   const parts = [element.tagName.toLowerCase()];
   for (const attribute of DESCRIBED_ATTRIBUTES) {
     const value = element.getAttribute(attribute);
-    if (value) parts.push(`${attribute}="${truncate(redactText(value), 60)}"`);
+    if (value) parts.push(`${attribute}="${truncate(redactor.text(value), 60)}"`);
   }
   const className = element.getAttribute("class");
   if (className) parts.push(`class="${truncate(className.trim().replace(/\s+/g, " "), 120)}"`);
   return `<${parts.join(" ")}>`;
 }
-function elementText(element, max = 120) {
+function elementText(element, max = 120, redactor = DEFAULT_REDACTOR) {
   const raw = element instanceof HTMLElement && typeof element.innerText === "string" ? element.innerText : element.textContent;
   const text = (raw ?? "").replace(/\s+/g, " ").trim();
-  return truncate(redactText(text), max);
+  return truncate(redactor.text(text), max);
 }
-function controlValue(element) {
+function controlValue(element, redactor = DEFAULT_REDACTOR) {
   if (element instanceof HTMLInputElement) {
     if (element.type === "password") return REDACTED;
     if (element.type === "checkbox" || element.type === "radio") return element.checked ? "checked" : "unchecked";
-    return truncate(redactText(element.value), 120);
+    return truncate(redactor.text(element.value), 120);
   }
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-    return truncate(redactText(element.value), 120);
+    return truncate(redactor.text(element.value), 120);
   }
   return null;
 }
@@ -713,6 +808,7 @@ var DATA_COMPONENTS = 2;
 var LOCATED_COMPONENTS = 4;
 async function captureElement(element, resolve, options = {}) {
   const win = element.ownerDocument.defaultView ?? window;
+  const redactor = options.redactor ?? DEFAULT_REDACTOR;
   const fiber = fiberOf(element);
   const components = fiber === null ? [] : componentAncestors(fiber);
   const sites = [fiber, ...components.slice(0, LOCATED_COMPONENTS)].map(
@@ -735,15 +831,15 @@ async function captureElement(element, resolve, options = {}) {
     },
     element: {
       tag: element.tagName.toLowerCase(),
-      opening: describeElement(element),
+      opening: describeElement(element, redactor),
       selector: cssSelector(element),
-      text: elementText(element),
-      value: controlValue(element),
+      text: elementText(element, void 0, redactor),
+      value: controlValue(element, redactor),
       rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
       styles: notableStyles(win.getComputedStyle(element)),
-      accessibility: describeAccessibility(element),
-      section: sectionPath(element),
-      nearby: nearbyText(element)
+      accessibility: describeAccessibility(element, redactor),
+      section: sectionPath(element, redactor),
+      nearby: nearbyText(element, redactor)
     },
     viewport: { width: win.innerWidth, height: win.innerHeight, devicePixelRatio: win.devicePixelRatio },
     jsx: locate(sites[0]),
@@ -753,8 +849,8 @@ async function captureElement(element, resolve, options = {}) {
     })),
     data: components.slice(0, options.dataComponents ?? DATA_COMPONENTS).map((component) => ({
       component: componentName(component),
-      props: toSnapshot(component.memoizedProps),
-      state: toSnapshot(componentState(component))
+      props: toSnapshot(component.memoizedProps, DEFAULT_LIMITS, redactor),
+      state: toSnapshot(componentState(component), DEFAULT_LIMITS, redactor)
     }))
   };
 }
@@ -847,6 +943,8 @@ var PATHS = {
   crop: ["M6 2v14a2 2 0 0 0 2 2h14", "M18 22V8a2 2 0 0 0-2-2H2"],
   cropOff: ["M6 2v14a2 2 0 0 0 2 2h14", "M18 22V8a2 2 0 0 0-2-2H2", "M3 3l18 18"],
   collapse: ["M9 6l6 6-6 6"],
+  shield: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", "M9 12l2 2 4-4"],
+  shieldOff: ["M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", "M3 3l18 18"],
   ruler: ["M3 17L17 3l4 4L7 21z", "M7 13l2 2", "M10 10l2 2", "M13 7l2 2"]
 };
 function Icon(props) {
@@ -1267,7 +1365,9 @@ function Panel(props) {
         /* @__PURE__ */ jsxs2("div", { style: { padding: 10, display: "flex", alignItems: "center", gap: 8 }, children: [
           /* @__PURE__ */ jsxs2("label", { style: { ...FONT2, display: "flex", gap: 6, alignItems: "center", fontSize: 12, color: MUTED, cursor: "pointer", flex: 1 }, children: [
             /* @__PURE__ */ jsx3("input", { type: "checkbox", checked: props.includeData, onChange: (event) => props.onIncludeData(event.target.checked) }),
-            "Include props/state (personal data redacted)"
+            "Include props/state (",
+            props.redactionOn ? "personal data redacted" : "redaction off",
+            ")"
           ] }),
           /* @__PURE__ */ jsx3("button", { type: "button", onClick: props.onClear, style: { ...BUTTON, color: "#B42318" }, children: "Clear all" })
         ] })
@@ -1467,6 +1567,16 @@ function Toolbar(props) {
             onClick: props.onScreenshot
           }
         ),
+        /* @__PURE__ */ jsx3(
+          ToolButton,
+          {
+            icon: props.redactionOn ? "shield" : "shieldOff",
+            label: "Redaction settings",
+            hint: props.redactionOn ? "Personal data is redacted from the prompt. Choose countries or add your own patterns." : "Redaction is OFF: new comments carry personal data as the page shows it.",
+            pressed: props.settingsOpen,
+            onClick: props.onToggleSettings
+          }
+        ),
         /* @__PURE__ */ jsx3(Divider, {}),
         /* @__PURE__ */ jsx3(
           Tooltip,
@@ -1633,6 +1743,135 @@ function keyCaps(shortcut) {
   return shortcut.split("+").map((key) => names[key] ?? key);
 }
 
+// src/redaction-panel.tsx
+import { jsx as jsx4, jsxs as jsxs3 } from "react/jsx-runtime";
+var LABEL = { ...FONT2, display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" };
+function RedactionPanel(props) {
+  const { settings } = props;
+  const off = !settings.enabled;
+  const update = (patch) => props.onChange({ ...settings, ...patch });
+  const toggleCountry = (country, on) => update({ countries: COUNTRIES.filter((each) => each === country ? on : settings.countries.includes(each)) });
+  const errors = settings.patterns.flatMap((source, index) => {
+    if (source.trim() === "") return [];
+    const compiled = compilePattern(source);
+    return typeof compiled === "string" ? [`Line ${index + 1}: ${compiled}`] : [];
+  });
+  return /* @__PURE__ */ jsxs3(
+    "div",
+    {
+      role: "dialog",
+      "aria-label": "Redaction settings",
+      style: {
+        ...FONT2,
+        position: "fixed",
+        right: 16,
+        bottom: 72,
+        width: 340,
+        maxHeight: "70vh",
+        overflowY: "auto",
+        background: "#FFFFFF",
+        border: `1px solid ${LINE}`,
+        borderRadius: 10,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+        zIndex: Z + 2,
+        boxSizing: "border-box"
+      },
+      children: [
+        /* @__PURE__ */ jsxs3("div", { style: { display: "flex", alignItems: "center", padding: "8px 10px", borderBottom: `1px solid ${LINE}` }, children: [
+          /* @__PURE__ */ jsx4("strong", { style: { ...FONT2, fontWeight: 600 }, children: "Personal data redaction" }),
+          /* @__PURE__ */ jsx4("button", { type: "button", onClick: props.onClose, "aria-label": "Close redaction settings", style: { ...BUTTON, marginLeft: "auto", padding: "2px 8px" }, children: "Close" })
+        ] }),
+        /* @__PURE__ */ jsxs3("div", { style: { ...FONT2, padding: 10, display: "flex", flexDirection: "column", gap: 12 }, children: [
+          /* @__PURE__ */ jsxs3("label", { style: { ...LABEL, alignItems: "center" }, children: [
+            /* @__PURE__ */ jsx4(
+              "input",
+              {
+                type: "checkbox",
+                role: "switch",
+                checked: settings.enabled,
+                "aria-checked": settings.enabled,
+                onChange: (event) => update({ enabled: event.target.checked })
+              }
+            ),
+            /* @__PURE__ */ jsx4("span", { style: { ...FONT2, fontWeight: 600 }, children: "Redact personal data" })
+          ] }),
+          /* @__PURE__ */ jsx4("p", { style: { ...FONT2, margin: 0, fontSize: 12, color: off ? "#B42318" : MUTED }, children: off ? "Off: new comments carry props, state and page text exactly as the page shows them. Password fields stay hidden." : "Values under keys like phone, email, name, address, ID, password or token, and every e-mail address, become [redacted]." }),
+          /* @__PURE__ */ jsxs3("fieldset", { disabled: off, style: { ...FONT2, margin: 0, padding: 0, border: 0, opacity: off ? 0.5 : 1 }, children: [
+            /* @__PURE__ */ jsx4("legend", { style: { ...FONT2, padding: 0, marginBottom: 6, fontWeight: 600 }, children: "Number formats" }),
+            /* @__PURE__ */ jsx4("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: COUNTRIES.map((country) => /* @__PURE__ */ jsxs3("label", { style: LABEL, children: [
+              /* @__PURE__ */ jsx4(
+                "input",
+                {
+                  type: "checkbox",
+                  checked: settings.countries.includes(country),
+                  onChange: (event) => toggleCountry(country, event.target.checked),
+                  style: { marginTop: 3 }
+                }
+              ),
+              /* @__PURE__ */ jsxs3("span", { style: FONT2, children: [
+                COUNTRY_RULES[country].label,
+                /* @__PURE__ */ jsx4("span", { style: { ...FONT2, display: "block", fontSize: 11, color: MUTED }, children: COUNTRY_RULES[country].covers })
+              ] })
+            ] }, country)) })
+          ] }),
+          /* @__PURE__ */ jsxs3("fieldset", { disabled: off, style: { ...FONT2, margin: 0, padding: 0, border: 0, opacity: off ? 0.5 : 1 }, children: [
+            /* @__PURE__ */ jsx4("legend", { style: { ...FONT2, padding: 0, marginBottom: 4, fontWeight: 600 }, children: "Your own patterns" }),
+            /* @__PURE__ */ jsxs3("label", { htmlFor: "agent-annotator-patterns", style: { ...FONT2, display: "block", fontSize: 11, color: MUTED, marginBottom: 4 }, children: [
+              "One regular expression per line, e.g. ",
+              /* @__PURE__ */ jsxs3("code", { children: [
+                "INV-\\d",
+                "{6}"
+              ] }),
+              " or ",
+              /* @__PURE__ */ jsx4("code", { children: "/acct[0-9]+/i" }),
+              "."
+            ] }),
+            /* @__PURE__ */ jsx4(
+              "textarea",
+              {
+                id: "agent-annotator-patterns",
+                value: settings.patterns.join("\n"),
+                onChange: (event) => update({ patterns: event.target.value === "" ? [] : event.target.value.split("\n") }),
+                rows: 3,
+                spellCheck: false,
+                "aria-invalid": errors.length > 0,
+                style: {
+                  ...FONT2,
+                  width: "100%",
+                  boxSizing: "border-box",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontSize: 12,
+                  padding: 6,
+                  border: `1px solid ${errors.length > 0 ? "#B42318" : LINE}`,
+                  borderRadius: 6,
+                  resize: "vertical"
+                }
+              }
+            ),
+            errors.length > 0 ? /* @__PURE__ */ jsx4("ul", { role: "alert", style: { ...FONT2, margin: "4px 0 0", paddingLeft: 16, fontSize: 11, color: "#B42318" }, children: errors.map((error) => /* @__PURE__ */ jsxs3("li", { children: [
+              error,
+              " \u2014 skipped"
+            ] }, error)) }) : null
+          ] }),
+          /* @__PURE__ */ jsxs3("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+            /* @__PURE__ */ jsx4("span", { style: { ...FONT2, flex: 1, fontSize: 11, color: MUTED }, children: "Applies to comments made from now on. Saved in this browser." }),
+            /* @__PURE__ */ jsx4(
+              "button",
+              {
+                type: "button",
+                onClick: props.onReset,
+                disabled: !props.customised,
+                style: { ...BUTTON, color: props.customised ? ACCENT : MUTED, cursor: props.customised ? "pointer" : "default" },
+                children: "Use app defaults"
+              }
+            )
+          ] })
+        ] })
+      ]
+    }
+  );
+}
+
 // src/page-tools.ts
 var OWN_SELECTOR = "[data-dev-annotator]";
 var MAX_AREA_ELEMENTS = 8;
@@ -1694,17 +1933,23 @@ function buildPrompt(annotations, options) {
   const first = annotations[0]?.targets[0]?.page;
   const origin = first === void 0 ? "" : new URL(first.url).origin;
   const lines = [
-    `# UI change requests: ${options.appName} (${annotations.length} ${annotations.length === 1 ? "comment" : "comments"})`,
+    `# Change requests: ${options.appName} (${annotations.length} ${annotations.length === 1 ? "comment" : "comments"})`,
     "",
     `Dev environment ${origin}, recorded ${formatTime(options.now)}.` + (options.appDir ? ` The app lives in \`${options.appDir}\`; file paths are from the repo root.` : ""),
     "",
-    "Work through the comments below one by one. Each names the selected element, where its JSX is in the source, the components around it" + (options.includeData ? ", and their props/state when the comment was made" : "") + `. The element's JSX location is exact; a component's "rendered at" location may point at an earlier render branch when React reused the component, so check it against the code. Open the source file before editing. If the line numbers have drifted, search by selector, element text and component name. Personal data has been replaced with \`${REDACTED}\`; never treat it as a real value. When done, summarise the changes by comment number.`
+    "Work through the comments below one by one. Each names the selected element, where its JSX is in the source, the components around it" + (options.includeData ? ", and their props/state when the comment was made" : "") + `. The element's JSX location is exact; a component's "rendered at" location may point at an earlier render branch when React reused the component, so check it against the code. Open the source file before editing. If the line numbers have drifted, search by selector, element text and component name. ` + redactionNote(annotations) + "When done, summarise the changes by comment number."
   ];
   annotations.forEach((annotation, index) => {
     lines.push("", "---", "", ...section(annotation, index + 1, options));
   });
   return `${lines.join("\n")}
 `;
+}
+function redactionNote(annotations) {
+  const raw = annotations.flatMap((annotation, index) => annotation.redacted === false ? [index + 1] : []);
+  if (raw.length === annotations.length && raw.length > 0) return "";
+  const except = raw.length === 0 ? "" : ` (except in comment${raw.length === 1 ? "" : "s"} ${raw.join(", ")}, recorded with redaction off)`;
+  return `Personal data has been replaced with \`${REDACTED}\`${except}; never treat it as a real value. `;
 }
 var KIND_NOTE = {
   element: null,
@@ -1935,13 +2180,13 @@ import {
 } from "react";
 
 // src/callout-tip.tsx
-import { jsx as jsx4, jsxs as jsxs3 } from "react/jsx-runtime";
+import { jsx as jsx5, jsxs as jsxs4 } from "react/jsx-runtime";
 var FONT3 = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 var RED = "#E5484D";
 var LOOP = "3.2s";
 var KEY_TIMES = "0;0.12;0.55;0.85;1";
 function CalloutTip(props) {
-  return /* @__PURE__ */ jsxs3(
+  return /* @__PURE__ */ jsxs4(
     "div",
     {
       role: "note",
@@ -1961,7 +2206,7 @@ function CalloutTip(props) {
         zIndex: 2
       },
       children: [
-        /* @__PURE__ */ jsx4(
+        /* @__PURE__ */ jsx5(
           "span",
           {
             "aria-hidden": "true",
@@ -1978,10 +2223,10 @@ function CalloutTip(props) {
             }
           }
         ),
-        /* @__PURE__ */ jsx4(Demo, {}),
-        /* @__PURE__ */ jsx4("strong", { style: { display: "block", marginTop: 10, font: `600 13px/1.35 ${FONT3}`, color: "#FFFFFF" }, children: props.nudge ? "Tip: drag instead of clicking" : "Drag to point at something" }),
-        /* @__PURE__ */ jsx4("span", { style: { display: "block", marginTop: 4, color: "#C9C5BE" }, children: props.nudge ? "Press on what you mean and drag to where the text goes: the box gets a tail pointing there." : "Press on what you mean, drag to where the text goes, then type. A plain click makes a box without a tail." }),
-        /* @__PURE__ */ jsx4(
+        /* @__PURE__ */ jsx5(Demo, {}),
+        /* @__PURE__ */ jsx5("strong", { style: { display: "block", marginTop: 10, font: `600 13px/1.35 ${FONT3}`, color: "#FFFFFF" }, children: props.nudge ? "Tip: drag instead of clicking" : "Drag to point at something" }),
+        /* @__PURE__ */ jsx5("span", { style: { display: "block", marginTop: 4, color: "#C9C5BE" }, children: props.nudge ? "Press on what you mean and drag to where the text goes: the box gets a tail pointing there." : "Press on what you mean, drag to where the text goes, then type. A plain click makes a box without a tail." }),
+        /* @__PURE__ */ jsx5(
           "button",
           {
             type: "button",
@@ -2007,24 +2252,24 @@ function CalloutTip(props) {
 function Demo() {
   const x = "52;52;172;172;52";
   const y = "70;70;27;27;70";
-  return /* @__PURE__ */ jsxs3("svg", { width: "240", height: "96", viewBox: "0 0 240 96", "aria-hidden": "true", style: { display: "block", borderRadius: 6, background: "#F6F3EE" }, children: [
-    /* @__PURE__ */ jsx4("rect", { x: "16", y: "56", width: "74", height: "28", rx: "4", fill: "#E6E0D6" }),
-    /* @__PURE__ */ jsx4("rect", { x: "24", y: "64", width: "40", height: "5", rx: "2", fill: "#B9B2A6" }),
-    /* @__PURE__ */ jsx4("rect", { x: "24", y: "73", width: "56", height: "4", rx: "2", fill: "#CFC8BC" }),
-    /* @__PURE__ */ jsxs3("line", { x1: "52", y1: "70", x2: "52", y2: "70", stroke: RED, strokeWidth: "3", strokeLinecap: "round", children: [
-      /* @__PURE__ */ jsx4("animate", { attributeName: "x2", values: x, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
-      /* @__PURE__ */ jsx4("animate", { attributeName: "y2", values: y, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
-      /* @__PURE__ */ jsx4("animate", { attributeName: "opacity", values: "0;1;1;1;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
+  return /* @__PURE__ */ jsxs4("svg", { width: "240", height: "96", viewBox: "0 0 240 96", "aria-hidden": "true", style: { display: "block", borderRadius: 6, background: "#F6F3EE" }, children: [
+    /* @__PURE__ */ jsx5("rect", { x: "16", y: "56", width: "74", height: "28", rx: "4", fill: "#E6E0D6" }),
+    /* @__PURE__ */ jsx5("rect", { x: "24", y: "64", width: "40", height: "5", rx: "2", fill: "#B9B2A6" }),
+    /* @__PURE__ */ jsx5("rect", { x: "24", y: "73", width: "56", height: "4", rx: "2", fill: "#CFC8BC" }),
+    /* @__PURE__ */ jsxs4("line", { x1: "52", y1: "70", x2: "52", y2: "70", stroke: RED, strokeWidth: "3", strokeLinecap: "round", children: [
+      /* @__PURE__ */ jsx5("animate", { attributeName: "x2", values: x, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
+      /* @__PURE__ */ jsx5("animate", { attributeName: "y2", values: y, keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }),
+      /* @__PURE__ */ jsx5("animate", { attributeName: "opacity", values: "0;1;1;1;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
     ] }),
-    /* @__PURE__ */ jsxs3("g", { opacity: "0", children: [
-      /* @__PURE__ */ jsx4("rect", { x: "128", y: "13", width: "92", height: "28", rx: "5", fill: RED }),
-      /* @__PURE__ */ jsx4("text", { x: "174", y: "31.5", textAnchor: "middle", fill: "#FFFFFF", style: { font: `600 12px ${FONT3}` }, children: "Too tight" }),
-      /* @__PURE__ */ jsx4("animate", { attributeName: "opacity", values: "0;0;1;0;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
+    /* @__PURE__ */ jsxs4("g", { opacity: "0", children: [
+      /* @__PURE__ */ jsx5("rect", { x: "128", y: "13", width: "92", height: "28", rx: "5", fill: RED }),
+      /* @__PURE__ */ jsx5("text", { x: "174", y: "31.5", textAnchor: "middle", fill: "#FFFFFF", style: { font: `600 12px ${FONT3}` }, children: "Too tight" }),
+      /* @__PURE__ */ jsx5("animate", { attributeName: "opacity", values: "0;0;1;0;0", keyTimes: KEY_TIMES, dur: LOOP, calcMode: "discrete", repeatCount: "indefinite" })
     ] }),
-    /* @__PURE__ */ jsx4("circle", { cx: "52", cy: "70", r: "0", fill: "none", stroke: "#1F1E1D", strokeWidth: "1.5", children: /* @__PURE__ */ jsx4("animate", { attributeName: "r", values: "0;11;0;0;0", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }) }),
-    /* @__PURE__ */ jsxs3("g", { children: [
-      /* @__PURE__ */ jsx4("path", { d: "M0 0 L0 15 L4 11 L7 18 L10 17 L7 10 L12 10 Z", fill: "#FFFFFF", stroke: "#1F1E1D", strokeWidth: "1.2", strokeLinejoin: "round" }),
-      /* @__PURE__ */ jsx4("animateTransform", { attributeName: "transform", type: "translate", values: "52 70;52 70;172 27;172 27;52 70", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" })
+    /* @__PURE__ */ jsx5("circle", { cx: "52", cy: "70", r: "0", fill: "none", stroke: "#1F1E1D", strokeWidth: "1.5", children: /* @__PURE__ */ jsx5("animate", { attributeName: "r", values: "0;11;0;0;0", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" }) }),
+    /* @__PURE__ */ jsxs4("g", { children: [
+      /* @__PURE__ */ jsx5("path", { d: "M0 0 L0 15 L4 11 L7 18 L10 17 L7 10 L12 10 Z", fill: "#FFFFFF", stroke: "#1F1E1D", strokeWidth: "1.2", strokeLinejoin: "round" }),
+      /* @__PURE__ */ jsx5("animateTransform", { attributeName: "transform", type: "translate", values: "52 70;52 70;172 27;172 27;52 70", keyTimes: KEY_TIMES, dur: LOOP, repeatCount: "indefinite" })
     ] })
   ] });
 }
@@ -2486,7 +2731,7 @@ function drawMark(context, base, mark, width, imageWidth, pixelRatio) {
 }
 
 // src/screenshot-editor.tsx
-import { jsx as jsx5, jsxs as jsxs4 } from "react/jsx-runtime";
+import { jsx as jsx6, jsxs as jsxs5 } from "react/jsx-runtime";
 var TOOLS = [
   { tool: "select", icon: "select", label: "Select & move", key: "V", detail: "Click a mark to select it, drag to move it, Delete to remove it. Double-click text to edit it." },
   { tool: "arrow", icon: "arrow", label: "Arrow", key: "A", detail: "Hold Shift to snap to 45\xB0." },
@@ -2983,7 +3228,7 @@ function ScreenshotEditor(props) {
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : tool === "select" ? drag !== null ? "grabbing" : hovering ? "move" : "default" : "crosshair";
   const custom = !COLORS.includes(color.toUpperCase());
   const textLayout = text === null ? null : calloutLayout({ at: text.at, text: text.value, weight: text.weight }, image.width, measureText());
-  return /* @__PURE__ */ jsxs4(
+  return /* @__PURE__ */ jsxs5(
     "div",
     {
       ref: dialogRef,
@@ -2992,14 +3237,14 @@ function ScreenshotEditor(props) {
       "aria-label": "Screenshot editor",
       style: { ...FONT2, position: "fixed", inset: 0, display: "flex", flexDirection: "column", background: "#0E0E0E", zIndex: Z + 5 },
       children: [
-        /* @__PURE__ */ jsxs4(
+        /* @__PURE__ */ jsxs5(
           "div",
           {
             role: "toolbar",
             "aria-label": "Markup tools",
             style: { display: "flex", alignItems: "center", gap: 2, padding: "8px 12px", background: INK, borderBottom: "1px solid rgba(255,255,255,0.12)", flexWrap: "wrap", rowGap: 6 },
             children: [
-              TOOLS.map((entry) => /* @__PURE__ */ jsx5(
+              TOOLS.map((entry) => /* @__PURE__ */ jsx6(
                 BarButton,
                 {
                   icon: entry.icon,
@@ -3011,8 +3256,8 @@ function ScreenshotEditor(props) {
                 },
                 entry.tool
               )),
-              /* @__PURE__ */ jsx5(Divider2, {}),
-              COLORS.map((swatch) => /* @__PURE__ */ jsx5(Tooltip, { label: COLOR_NAMES[swatch] ?? swatch, placement: "below", children: (describedBy) => /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6(Divider2, {}),
+              COLORS.map((swatch) => /* @__PURE__ */ jsx6(Tooltip, { label: COLOR_NAMES[swatch] ?? swatch, placement: "below", children: (describedBy) => /* @__PURE__ */ jsx6(
                 "button",
                 {
                   type: "button",
@@ -3023,8 +3268,8 @@ function ScreenshotEditor(props) {
                   style: swatchStyle(swatch, color.toUpperCase() === swatch)
                 }
               ) }, swatch)),
-              /* @__PURE__ */ jsx5(Tooltip, { label: "Custom colour", detail: "Pick any colour.", placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs4("span", { style: { position: "relative", display: "inline-flex" }, children: [
-                /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6(Tooltip, { label: "Custom colour", detail: "Pick any colour.", placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs5("span", { style: { position: "relative", display: "inline-flex" }, children: [
+                /* @__PURE__ */ jsx6(
                   "span",
                   {
                     "aria-hidden": "true",
@@ -3034,7 +3279,7 @@ function ScreenshotEditor(props) {
                     }
                   }
                 ),
-                /* @__PURE__ */ jsx5(
+                /* @__PURE__ */ jsx6(
                   "input",
                   {
                     ref: customColorRef,
@@ -3047,8 +3292,8 @@ function ScreenshotEditor(props) {
                   }
                 )
               ] }) }),
-              /* @__PURE__ */ jsx5(Divider2, {}),
-              WEIGHTS.map((entry) => /* @__PURE__ */ jsx5(Tooltip, { label: `${entry.label} stroke`, shortcut: [String(entry.weight)], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6(Divider2, {}),
+              WEIGHTS.map((entry) => /* @__PURE__ */ jsx6(Tooltip, { label: `${entry.label} stroke`, shortcut: [String(entry.weight)], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx6(
                 "button",
                 {
                   type: "button",
@@ -3057,13 +3302,13 @@ function ScreenshotEditor(props) {
                   "aria-describedby": describedBy,
                   "aria-pressed": weight === entry.weight,
                   style: { ...iconButton(weight === entry.weight), width: 30, minWidth: 30 },
-                  children: /* @__PURE__ */ jsx5("span", { "aria-hidden": "true", style: { width: entry.dot, height: entry.dot, borderRadius: entry.dot, background: "#FFFFFF" } })
+                  children: /* @__PURE__ */ jsx6("span", { "aria-hidden": "true", style: { width: entry.dot, height: entry.dot, borderRadius: entry.dot, background: "#FFFFFF" } })
                 }
               ) }, entry.weight)),
-              /* @__PURE__ */ jsx5(Divider2, {}),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "undo", label: "Undo", shortcut: [MOD_KEY, "Z"], disabled: history.past.length === 0, onClick: undo }),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "redo", label: "Redo", shortcut: [MOD_KEY, "\u21E7", "Z"], disabled: history.future.length === 0, onClick: redo }),
-              /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6(Divider2, {}),
+              /* @__PURE__ */ jsx6(BarButton, { icon: "undo", label: "Undo", shortcut: [MOD_KEY, "Z"], disabled: history.past.length === 0, onClick: undo }),
+              /* @__PURE__ */ jsx6(BarButton, { icon: "redo", label: "Redo", shortcut: [MOD_KEY, "\u21E7", "Z"], disabled: history.future.length === 0, onClick: redo }),
+              /* @__PURE__ */ jsx6(
                 BarButton,
                 {
                   icon: "eraser",
@@ -3078,8 +3323,8 @@ function ScreenshotEditor(props) {
                   }
                 }
               ),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "trash", label: "Clear all marks", disabled: marks.length === 0, onClick: () => commit(NO_MARKS) }),
-              /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6(BarButton, { icon: "trash", label: "Clear all marks", disabled: marks.length === 0, onClick: () => commit(NO_MARKS) }),
+              /* @__PURE__ */ jsx6(
                 BarButton,
                 {
                   icon: "cropOff",
@@ -3089,9 +3334,9 @@ function ScreenshotEditor(props) {
                   onClick: () => commitCrop(null)
                 }
               ),
-              /* @__PURE__ */ jsx5("span", { style: { flex: 1, minWidth: 8 } }),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "zoomOut", label: "Zoom out", shortcut: [MOD_KEY, "\u2212"], disabled: percent <= MIN_ZOOM * 1.01, onClick: () => zoomStep(-1) }),
-              /* @__PURE__ */ jsx5(Tooltip, { label: zoom === null ? "Actual size" : "Fit to window", shortcut: zoom === null ? [MOD_KEY, "1"] : [MOD_KEY, "0"], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6("span", { style: { flex: 1, minWidth: 8 } }),
+              /* @__PURE__ */ jsx6(BarButton, { icon: "zoomOut", label: "Zoom out", shortcut: [MOD_KEY, "\u2212"], disabled: percent <= MIN_ZOOM * 1.01, onClick: () => zoomStep(-1) }),
+              /* @__PURE__ */ jsx6(Tooltip, { label: zoom === null ? "Actual size" : "Fit to window", shortcut: zoom === null ? [MOD_KEY, "1"] : [MOD_KEY, "0"], placement: "below", children: (describedBy) => /* @__PURE__ */ jsx6(
                 "button",
                 {
                   type: "button",
@@ -3099,18 +3344,18 @@ function ScreenshotEditor(props) {
                   "aria-label": `Zoom ${Math.round(percent * 100)}%`,
                   "aria-describedby": describedBy,
                   style: { ...iconButton(false), minWidth: 54, padding: "0 6px", fontVariantNumeric: "tabular-nums" },
-                  children: /* @__PURE__ */ jsxs4("span", { style: { ...FONT2, color: "inherit", fontWeight: 600, fontSize: 12 }, children: [
+                  children: /* @__PURE__ */ jsxs5("span", { style: { ...FONT2, color: "inherit", fontWeight: 600, fontSize: 12 }, children: [
                     Math.round(percent * 100),
                     "%"
                   ] })
                 }
               ) }),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "zoomIn", label: "Zoom in", shortcut: [MOD_KEY, "+"], disabled: percent >= MAX_ZOOM * 0.99, onClick: () => zoomStep(1) }),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "fit", label: "Fit to window", shortcut: [MOD_KEY, "0"], pressed: zoom === null, onClick: () => zoomTo(null) }),
-              /* @__PURE__ */ jsx5(Divider2, {}),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "copy", label: "Copy image", shortcut: [MOD_KEY, "C"], text: "Copy", primary: true, onClick: () => void run("copy") }),
-              /* @__PURE__ */ jsx5(BarButton, { icon: "download", label: "Save as PNG", detail: fileName, shortcut: [MOD_KEY, "S"], text: "Save", onClick: () => void run("save") }),
-              /* @__PURE__ */ jsx5(
+              /* @__PURE__ */ jsx6(BarButton, { icon: "zoomIn", label: "Zoom in", shortcut: [MOD_KEY, "+"], disabled: percent >= MAX_ZOOM * 0.99, onClick: () => zoomStep(1) }),
+              /* @__PURE__ */ jsx6(BarButton, { icon: "fit", label: "Fit to window", shortcut: [MOD_KEY, "0"], pressed: zoom === null, onClick: () => zoomTo(null) }),
+              /* @__PURE__ */ jsx6(Divider2, {}),
+              /* @__PURE__ */ jsx6(BarButton, { icon: "copy", label: "Copy image", shortcut: [MOD_KEY, "C"], text: "Copy", primary: true, onClick: () => void run("copy") }),
+              /* @__PURE__ */ jsx6(BarButton, { icon: "download", label: "Save as PNG", detail: fileName, shortcut: [MOD_KEY, "S"], text: "Save", onClick: () => void run("save") }),
+              /* @__PURE__ */ jsx6(
                 BarButton,
                 {
                   icon: "close",
@@ -3124,9 +3369,9 @@ function ScreenshotEditor(props) {
             ]
           }
         ),
-        showTip && tipAt !== null ? /* @__PURE__ */ jsx5(CalloutTip, { left: tipAt.left, top: tipAt.top, nudge: tipNudge, onDismiss: learnCallout }) : null,
-        /* @__PURE__ */ jsx5("div", { ref: areaRef, style: { position: "relative", flex: 1, minHeight: 0, overflow: "auto" }, children: /* @__PURE__ */ jsx5("div", { style: { display: "flex", minWidth: "100%", minHeight: "100%", width: "max-content", height: "max-content" }, children: /* @__PURE__ */ jsxs4("div", { style: { position: "relative", margin: "auto", width: board.width * scale, height: board.height * scale, flex: "none" }, children: [
-          /* @__PURE__ */ jsx5(
+        showTip && tipAt !== null ? /* @__PURE__ */ jsx6(CalloutTip, { left: tipAt.left, top: tipAt.top, nudge: tipNudge, onDismiss: learnCallout }) : null,
+        /* @__PURE__ */ jsx6("div", { ref: areaRef, style: { position: "relative", flex: 1, minHeight: 0, overflow: "auto" }, children: /* @__PURE__ */ jsx6("div", { style: { display: "flex", minWidth: "100%", minHeight: "100%", width: "max-content", height: "max-content" }, children: /* @__PURE__ */ jsxs5("div", { style: { position: "relative", margin: "auto", width: board.width * scale, height: board.height * scale, flex: "none" }, children: [
+          /* @__PURE__ */ jsx6(
             "canvas",
             {
               ref: canvasRef,
@@ -3150,7 +3395,7 @@ function ScreenshotEditor(props) {
               }
             }
           ),
-          text === null || textLayout === null ? null : /* @__PURE__ */ jsx5(
+          text === null || textLayout === null ? null : /* @__PURE__ */ jsx6(
             "textarea",
             {
               "aria-label": "Callout text",
@@ -3194,7 +3439,7 @@ function ScreenshotEditor(props) {
             }
           )
         ] }) }) }),
-        /* @__PURE__ */ jsx5(
+        /* @__PURE__ */ jsx6(
           "div",
           {
             "aria-hidden": "true",
@@ -3249,10 +3494,10 @@ function iconButton(pressed) {
   };
 }
 function Divider2() {
-  return /* @__PURE__ */ jsx5("span", { "aria-hidden": "true", style: { width: 1, height: 20, margin: "0 6px", background: "rgba(255,255,255,0.18)" } });
+  return /* @__PURE__ */ jsx6("span", { "aria-hidden": "true", style: { width: 1, height: 20, margin: "0 6px", background: "rgba(255,255,255,0.18)" } });
 }
 function BarButton(props) {
-  return /* @__PURE__ */ jsx5(Tooltip, { label: props.label, ...props.detail === void 0 ? {} : { detail: props.detail }, ...props.shortcut === void 0 ? {} : { shortcut: props.shortcut }, placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs4(
+  return /* @__PURE__ */ jsx6(Tooltip, { label: props.label, ...props.detail === void 0 ? {} : { detail: props.detail }, ...props.shortcut === void 0 ? {} : { shortcut: props.shortcut }, placement: "below", children: (describedBy) => /* @__PURE__ */ jsxs5(
     "button",
     {
       type: "button",
@@ -3269,8 +3514,8 @@ function BarButton(props) {
         background: props.danger ? "#B42318" : props.primary ? ACCENT : props.pressed ? "rgba(255,255,255,0.2)" : "transparent"
       },
       children: [
-        /* @__PURE__ */ jsx5(Icon, { name: props.icon }),
-        props.text === void 0 ? null : /* @__PURE__ */ jsx5("span", { style: { ...FONT2, color: "inherit", fontWeight: 600 }, children: props.text })
+        /* @__PURE__ */ jsx6(Icon, { name: props.icon }),
+        props.text === void 0 ? null : /* @__PURE__ */ jsx6("span", { style: { ...FONT2, color: "inherit", fontWeight: 600 }, children: props.text })
       ]
     }
   ) });
@@ -3309,7 +3554,7 @@ function boardAround(content, image, area, scale) {
 }
 
 // src/annotator.tsx
-import { jsx as jsx6, jsxs as jsxs5 } from "react/jsx-runtime";
+import { jsx as jsx7, jsxs as jsxs6 } from "react/jsx-runtime";
 var ISOLATED = ["pointerdown", "pointerup", "mousedown", "mouseup", "dblclick"];
 var REFLOW_MS = 400;
 var MIN_AREA = 8;
@@ -3326,6 +3571,13 @@ var KIND_LABEL = {
 function DevAnnotator(props) {
   const { appName, appDir } = props;
   const storageKey = `agent-annotator:${appName}`;
+  const redactionKey = `agent-annotator:redaction:${appName}`;
+  const redactionDefaults = resolveRedaction(props.redaction);
+  const [savedRedaction, setSavedRedaction] = useState3(() => readRedaction(redactionKey));
+  const redaction = savedRedaction ?? redactionDefaults;
+  const redactionJson = JSON.stringify(redaction);
+  const redactor = useMemo(() => createRedactor(JSON.parse(redactionJson)), [redactionJson]);
+  const [settingsOpen, setSettingsOpen] = useState3(false);
   const [resolveFrames] = useState3(() => props.resolveFrames ?? createNextResolver());
   const [active, setActive] = useState3(false);
   const [items, setItems] = useState3(() => restore(storageKey));
@@ -3363,12 +3615,13 @@ function DevAnnotator(props) {
       const several = selection.elements.length > 1;
       const captures = Promise.all(
         selection.elements.map(
-          (element) => captureElement(element, resolveFrames, { dataComponents: several ? 1 : 2 })
+          (element) => captureElement(element, resolveFrames, { dataComponents: several ? 1 : 2, redactor })
         )
       );
-      setDraft({ ...selection, captures, comment: "", editingId: null });
+      const screened = selection.selectedText === void 0 ? {} : { selectedText: truncate(redactor.text(selection.selectedText), 500) };
+      setDraft({ ...selection, ...screened, captures, comment: "", redacted: redactor.enabled, editingId: null });
     },
-    [resolveFrames]
+    [resolveFrames, redactor]
   );
   useEffect3(() => {
     if (!active) return void 0;
@@ -3537,7 +3790,8 @@ function DevAnnotator(props) {
       targets,
       ...draft.selectedText === void 0 ? {} : { selectedText: draft.selectedText },
       ...draft.area === void 0 ? {} : { area: draft.area },
-      ...draft.areaInContainer === void 0 ? {} : { areaInContainer: draft.areaInContainer }
+      ...draft.areaInContainer === void 0 ? {} : { areaInContainer: draft.areaInContainer },
+      ...draft.redacted ? {} : { redacted: false }
     };
     setItems((current) => [...current, { annotation, elements: draft.elements }]);
     setPanelOpen(true);
@@ -3557,6 +3811,7 @@ function DevAnnotator(props) {
       ...annotation.selectedText === void 0 ? {} : { selectedText: annotation.selectedText },
       captures: Promise.resolve(annotation.targets),
       comment: annotation.comment,
+      redacted: annotation.redacted !== false,
       editingId: id
     });
   };
@@ -3628,15 +3883,15 @@ function DevAnnotator(props) {
     const item = items[number - 1];
     if (item !== void 0) editItem(item.annotation.id);
   };
-  const overlay = capturing ? /* @__PURE__ */ jsx6("div", { "data-dev-annotator": "", children: /* @__PURE__ */ jsx6(Callouts, { callouts: callouts ?? [], onEdit: null }) }) : /* @__PURE__ */ jsxs5("div", { "data-dev-annotator": "", children: [
-    active && !hintHidden ? /* @__PURE__ */ jsx6(Hint, { onDismiss: () => hideHint(true) }) : null,
-    active && hover !== null && hover.element !== draftElement && dragBox === null ? /* @__PURE__ */ jsx6(Highlight, { box: boxOf(hover.element), label: hover.label, strong: false }) : null,
-    group.map((element, index) => /* @__PURE__ */ jsx6(Highlight, { box: boxOf(element), label: `#${index + 1}`, strong: true }, index)),
-    dragBox !== null ? /* @__PURE__ */ jsx6(AreaBox, { box: { top: dragBox.y, left: dragBox.x, width: dragBox.width, height: dragBox.height } }) : null,
-    draft?.area !== void 0 ? /* @__PURE__ */ jsx6(AreaBox, { box: { top: draft.area.y, left: draft.area.x, width: draft.area.width, height: draft.area.height } }) : null,
-    draft !== null && draft.kind !== "area" ? draft.elements.filter((element) => element.isConnected).map((element, index) => /* @__PURE__ */ jsx6(Highlight, { box: boxOf(element), label: index === 0 ? draft.label : `#${index + 1}`, strong: true }, index)) : null,
-    callouts !== null ? /* @__PURE__ */ jsx6(Callouts, { callouts, onEdit: editNumber }) : onScreen.map((target) => /* @__PURE__ */ jsx6(Pin, { box: target.box, number: target.number, onClick: () => editNumber(target.number) }, target.number)),
-    draft !== null ? /* @__PURE__ */ jsx6(
+  const overlay = capturing ? /* @__PURE__ */ jsx7("div", { "data-dev-annotator": "", children: /* @__PURE__ */ jsx7(Callouts, { callouts: callouts ?? [], onEdit: null }) }) : /* @__PURE__ */ jsxs6("div", { "data-dev-annotator": "", children: [
+    active && !hintHidden ? /* @__PURE__ */ jsx7(Hint, { onDismiss: () => hideHint(true) }) : null,
+    active && hover !== null && hover.element !== draftElement && dragBox === null ? /* @__PURE__ */ jsx7(Highlight, { box: boxOf(hover.element), label: hover.label, strong: false }) : null,
+    group.map((element, index) => /* @__PURE__ */ jsx7(Highlight, { box: boxOf(element), label: `#${index + 1}`, strong: true }, index)),
+    dragBox !== null ? /* @__PURE__ */ jsx7(AreaBox, { box: { top: dragBox.y, left: dragBox.x, width: dragBox.width, height: dragBox.height } }) : null,
+    draft?.area !== void 0 ? /* @__PURE__ */ jsx7(AreaBox, { box: { top: draft.area.y, left: draft.area.x, width: draft.area.width, height: draft.area.height } }) : null,
+    draft !== null && draft.kind !== "area" ? draft.elements.filter((element) => element.isConnected).map((element, index) => /* @__PURE__ */ jsx7(Highlight, { box: boxOf(element), label: index === 0 ? draft.label : `#${index + 1}`, strong: true }, index)) : null,
+    callouts !== null ? /* @__PURE__ */ jsx7(Callouts, { callouts, onEdit: editNumber }) : onScreen.map((target) => /* @__PURE__ */ jsx7(Pin, { box: target.box, number: target.number, onClick: () => editNumber(target.number) }, target.number)),
+    draft !== null ? /* @__PURE__ */ jsx7(
       Editor,
       {
         anchor: draft.area === void 0 ? draftBox : areaBox(draft.area),
@@ -3653,11 +3908,28 @@ function DevAnnotator(props) {
         }
       }
     ) : null,
-    panelOpen && !collapsed && items.length > 0 ? /* @__PURE__ */ jsx6(
+    settingsOpen && !collapsed ? /* @__PURE__ */ jsx7(
+      RedactionPanel,
+      {
+        settings: redaction,
+        customised: savedRedaction !== null,
+        onChange: (next) => {
+          setSavedRedaction(next);
+          writeRedaction(redactionKey, next);
+        },
+        onReset: () => {
+          setSavedRedaction(null);
+          writeRedaction(redactionKey, null);
+        },
+        onClose: () => setSettingsOpen(false)
+      }
+    ) : null,
+    panelOpen && !settingsOpen && !collapsed && items.length > 0 ? /* @__PURE__ */ jsx7(
       Panel,
       {
         entries,
         includeData,
+        redactionOn: redaction.enabled,
         onIncludeData: setIncludeData,
         onEdit: editItem,
         onClear: () => {
@@ -3667,7 +3939,7 @@ function DevAnnotator(props) {
         onClose: () => setPanelOpen(false)
       }
     ) : null,
-    /* @__PURE__ */ jsx6(
+    /* @__PURE__ */ jsx7(
       Toolbar,
       {
         active,
@@ -3677,6 +3949,9 @@ function DevAnnotator(props) {
         showComments,
         capturing,
         collapsed,
+        redactionOn: redaction.enabled,
+        settingsOpen,
+        onToggleSettings: () => setSettingsOpen(!settingsOpen),
         onToggleCollapsed: () => {
           setCollapsed(!collapsed);
           writeFlag(COLLAPSED_KEY, !collapsed);
@@ -3690,8 +3965,8 @@ function DevAnnotator(props) {
         onCopy: () => void copyPrompt()
       }
     ),
-    notice !== null ? /* @__PURE__ */ jsx6(Toast, { notice, onDismiss: () => setNotice(null) }) : null,
-    shot !== null ? /* @__PURE__ */ jsx6(ScreenshotEditor, { image: shot.image, fileName: shot.fileName, onClose: () => setShot(null), onNotice: setNotice }) : null
+    notice !== null ? /* @__PURE__ */ jsx7(Toast, { notice, onDismiss: () => setNotice(null) }) : null,
+    shot !== null ? /* @__PURE__ */ jsx7(ScreenshotEditor, { image: shot.image, fileName: shot.fileName, onClose: () => setShot(null), onNotice: setNotice }) : null
   ] });
   return createPortal(overlay, document.body);
 }
@@ -3713,7 +3988,7 @@ function selectedText() {
   const node = selection.getRangeAt(0).commonAncestorContainer;
   const element = node instanceof Element ? node : node.parentElement;
   if (element === null || element.closest(OWN_SELECTOR) !== null) return null;
-  return { element, text: truncate(redactText(text), 500) };
+  return { element, text };
 }
 function liveArea(item, container) {
   const offset = item.annotation.areaInContainer;
@@ -3722,10 +3997,10 @@ function liveArea(item, container) {
   return { x: origin.left + offset.x, y: origin.top + offset.y, width: offset.width, height: offset.height };
 }
 function liveElement(item) {
-  const [element] = item.elements;
-  if (element?.isConnected) return element;
   const first = item.annotation.targets[0];
   if (first === void 0 || window.location.pathname !== first.page.pathname) return null;
+  const [element] = item.elements;
+  if (element?.isConnected) return element;
   try {
     return document.querySelector(first.element.selector);
   } catch {
@@ -3769,7 +4044,10 @@ async function writeClipboard(text) {
   area.remove();
 }
 export {
+  COUNTRIES,
+  DEFAULT_REDACTION,
   DevAnnotator,
+  REDACTED,
   buildPrompt,
   createNextResolver
 };
