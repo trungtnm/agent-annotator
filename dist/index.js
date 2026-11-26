@@ -364,10 +364,12 @@ var COMPONENT_TAGS = /* @__PURE__ */ new Set([FUNCTION_COMPONENT, CLASS_COMPONEN
 var FRAMEWORK_COMPONENTS = /* @__PURE__ */ new Set([
   "AppDevOverlay",
   "AppDevOverlayErrorBoundary",
+  "AppContainer",
   "AppRouter",
   "ClientPageRoot",
   "ClientSegmentRoot",
   "DevRootHTTPAccessFallbackBoundary",
+  "DevRootNotFoundBoundary",
   "ErrorBoundary",
   "ErrorBoundaryHandler",
   "GlobalError",
@@ -383,8 +385,12 @@ var FRAMEWORK_COMPONENTS = /* @__PURE__ */ new Set([
   "LoadingBoundary",
   "MetadataBoundary",
   "MetadataOutlet",
+  "NotFoundBoundary",
+  "NotFoundErrorBoundary",
   "OuterLayoutRouter",
   "OutletBoundary",
+  "PathnameContextProviderAdapter",
+  "ReactDevOverlay",
   "RedirectBoundary",
   "RedirectErrorBoundary",
   "RenderFromTemplateContext",
@@ -414,7 +420,8 @@ function isComponent(fiber) {
   return COMPONENT_TAGS.has(fiber.tag);
 }
 function componentName(fiber) {
-  return typeName(fiber.elementType ?? fiber.type);
+  const name = typeName(fiber.elementType);
+  return name === "Anonymous" ? typeName(fiber.type) : name;
 }
 function componentAncestors(fiber, limit = 12) {
   const out = [];
@@ -446,6 +453,19 @@ function debugStackOf(fiber) {
   const stack = fiber._debugStack;
   if (stack instanceof Error) return stack.stack ?? null;
   return typeof stack === "string" ? stack : null;
+}
+function debugSourceOf(fiber) {
+  const source = fiber._debugSource;
+  if (source === null || typeof source !== "object") return null;
+  const { fileName, lineNumber, columnNumber } = source;
+  if (typeof fileName !== "string" || fileName === "" || typeof lineNumber !== "number") return null;
+  return {
+    file: fileName,
+    line: lineNumber,
+    column: typeof columnNumber === "number" ? columnNumber : null,
+    mapped: true,
+    .../(?:^|[/\\])node_modules[/\\]/.test(fileName) ? { ignored: true } : {}
+  };
 }
 
 // src/selector.ts
@@ -818,11 +838,12 @@ async function captureElement(element, resolve, options = {}) {
   const sites = [fiber, ...components.slice(0, LOCATED_COMPONENTS)].map(
     (f) => f === null ? null : siteOf(f)
   );
-  const wanted = sites.filter((site) => site !== null);
+  const wanted = sites.flatMap((site) => site !== null && "frame" in site ? [site.frame] : []);
   const resolved = wanted.length > 0 ? await resolve(wanted) : [];
-  const locations = new Map(wanted.map((site, index) => [site, resolved[index]]));
+  const locations = new Map(wanted.map((frame, index) => [frame, resolved[index]]));
   const locate = (site) => {
-    const location2 = site ? locations.get(site) : void 0;
+    if (site === null || site === void 0) return null;
+    const location2 = "location" in site ? site.location : locations.get(site.frame);
     return location2 === void 0 || location2.ignored === true ? null : location2;
   };
   const rect = element.getBoundingClientRect();
@@ -859,8 +880,11 @@ async function captureElement(element, resolve, options = {}) {
   };
 }
 function siteOf(fiber) {
+  const location2 = debugSourceOf(fiber);
+  if (location2 !== null) return { location: location2 };
   const stack = debugStackOf(fiber);
-  return stack === null ? null : callSiteFrame(stack);
+  const frame = stack === null ? null : callSiteFrame(stack);
+  return frame === null ? null : { frame };
 }
 function notableStyles(style) {
   const out = {};
