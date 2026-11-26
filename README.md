@@ -10,7 +10,7 @@ component chain and the live props: no more "the button, top right, the grey one
 
 [![CI](https://github.com/trungtnm/agent-annotator/actions/workflows/ci.yml/badge.svg)](https://github.com/trungtnm/agent-annotator/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@trungtnm/agent-annotator)](https://www.npmjs.com/package/@trungtnm/agent-annotator)
-![React 19](https://img.shields.io/badge/React-19-61dafb)
+![React 18 | 19](https://img.shields.io/badge/React-18%20%7C%2019-61dafb)
 ![Next.js and Vite](https://img.shields.io/badge/works%20with-Next.js%20%C2%B7%20Vite-6d4aff)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -167,9 +167,10 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 
 ## Requirements
 
-- **React 19** in development mode. Source locations come from React 19's `_debugStack`; a
-  production build has none, which is also why the overlay belongs in dev only.
-- **Next.js 15** (webpack or Turbopack) or **Vite**, or any dev server that exposes source maps
+- **React 18 or 19** in development mode. Source locations come from React 18's `_debugSource`
+  (stamped by the dev JSX transform) or React 19's `_debugStack`; a production build has
+  neither, which is also why the overlay belongs in dev only.
+- **Next.js 15** (webpack or Turbopack), **Next.js 14** or **Vite**, or any dev server that exposes source maps
   beside its scripts or inline. Without one, the prompt still names the component chain and
   gives the bundled line, flagged as approximate.
 - Screenshots use the Screen Capture API: Chromium browsers on `localhost` or `https`. The browser
@@ -208,7 +209,11 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 **Which agent does the prompt target?** Any. It is plain Markdown that tells the agent what each
 field means and how to work through the comments.
 
-**Does it work with React 18?** No: React 18 has no `_debugStack`. React 19 only.
+**Does it work with React 18?** Yes. React 18 records each element's file and line itself
+(`_debugSource`), so the prompt gets exact source locations without a source-map lookup. One
+exception: Next.js 14's App Router runs its own React canary, which records no source location,
+so there the prompt names the components but not the JSX line. Its Pages Router uses your React 18
+and gets exact locations.
 
 **Can I try it without installing?** Clone the repo and run the demo:
 `pnpm install && pnpm --dir examples/demo install && pnpm --dir examples/demo dev`.

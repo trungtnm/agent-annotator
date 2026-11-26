@@ -1,7 +1,11 @@
 # Next.js guide
 
 Works with the App Router on Next.js 15, under webpack (`next dev`) and Turbopack
-(`next dev --turbopack`). React 19 is required.
+(`next dev --turbopack`), which runs on React 19.
+
+On Next.js 14 with React 18, the Pages Router gets exact JSX locations. The App Router on Next.js 14
+runs a React canary that records no source location, so the prompt names the components and their
+data but says the JSX "could not be located".
 
 ## 1. Install
 

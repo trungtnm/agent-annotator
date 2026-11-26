@@ -1,9 +1,11 @@
 import { typeName } from './serialize';
+import type { SourceLocation } from './stack';
 
 /**
  * Reading React's internal fiber tree from a DOM node. None of this is public API; it is
  * the same walk React DevTools does, kept to the fields that have been stable across
- * React 18 and 19. Development builds only: `_debugStack` does not exist in production.
+ * React 18 and 19. Development builds only: neither `_debugSource` (React 18) nor
+ * `_debugStack` (React 19) exists in production.
  */
 
 export interface Fiber {
@@ -15,6 +17,7 @@ export interface Fiber {
   readonly memoizedState: unknown;
   readonly stateNode: unknown;
   readonly _debugStack?: unknown;
+  readonly _debugSource?: unknown;
 }
 
 /** Fiber tags (react-reconciler `ReactWorkTags`) for things that are components. */
@@ -151,4 +154,30 @@ export function debugStackOf(fiber: Fiber): string | null {
   const stack = fiber._debugStack;
   if (stack instanceof Error) return stack.stack ?? null;
   return typeof stack === 'string' ? stack : null;
+}
+
+interface DebugSource {
+  readonly fileName?: unknown;
+  readonly lineNumber?: unknown;
+  readonly columnNumber?: unknown;
+}
+
+/**
+ * Where this fiber's element was written, as React 18 records it: the dev JSX transform
+ * (Babel, SWC, esbuild) passes `{ fileName, lineNumber, columnNumber }` to `jsxDEV`, and
+ * React keeps it as `fiber._debugSource`. It names the original source file already, so
+ * it needs no source-map lookup. React 19 dropped it; there, `debugStackOf` is the way.
+ */
+export function debugSourceOf(fiber: Fiber): SourceLocation | null {
+  const source = fiber._debugSource as DebugSource | null | undefined;
+  if (source === null || typeof source !== 'object') return null;
+  const { fileName, lineNumber, columnNumber } = source;
+  if (typeof fileName !== 'string' || fileName === '' || typeof lineNumber !== 'number') return null;
+  return {
+    file: fileName,
+    line: lineNumber,
+    column: typeof columnNumber === 'number' ? columnNumber : null,
+    mapped: true,
+    ...(/(?:^|[/\\])node_modules[/\\]/.test(fileName) ? { ignored: true } : {}),
+  };
 }

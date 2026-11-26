@@ -1,6 +1,6 @@
 # Vite guide
 
-Works with Vite and `@vitejs/plugin-react` on React 19. The demo in
+Works with Vite and `@vitejs/plugin-react` on React 18 or 19. The demo in
 [`examples/demo`](../examples/demo) is a complete Vite setup.
 
 ## 1. Install
