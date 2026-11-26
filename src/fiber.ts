@@ -32,10 +32,12 @@ const COMPONENT_TAGS = new Set([FUNCTION_COMPONENT, CLASS_COMPONENT, FORWARD_REF
 const FRAMEWORK_COMPONENTS = new Set([
   'AppDevOverlay',
   'AppDevOverlayErrorBoundary',
+  'AppContainer',
   'AppRouter',
   'ClientPageRoot',
   'ClientSegmentRoot',
   'DevRootHTTPAccessFallbackBoundary',
+  'DevRootNotFoundBoundary',
   'ErrorBoundary',
   'ErrorBoundaryHandler',
   'GlobalError',
@@ -51,8 +53,12 @@ const FRAMEWORK_COMPONENTS = new Set([
   'LoadingBoundary',
   'MetadataBoundary',
   'MetadataOutlet',
+  'NotFoundBoundary',
+  'NotFoundErrorBoundary',
   'OuterLayoutRouter',
   'OutletBoundary',
+  'PathnameContextProviderAdapter',
+  'ReactDevOverlay',
   'RedirectBoundary',
   'RedirectErrorBoundary',
   'RenderFromTemplateContext',
@@ -85,8 +91,14 @@ export function isComponent(fiber: Fiber): boolean {
   return COMPONENT_TAGS.has(fiber.tag);
 }
 
+/**
+ * `elementType` is what the JSX named: a memo/forwardRef wrapper keeps its own displayName
+ * there. A `React.lazy` component (how Next 14's App Router loads client components) has
+ * the lazy object there and nothing to name, so the resolved function in `type` is used.
+ */
 export function componentName(fiber: Fiber): string {
-  return typeName(fiber.elementType ?? fiber.type);
+  const name = typeName(fiber.elementType);
+  return name === 'Anonymous' ? typeName(fiber.type) : name;
 }
 
 /**
