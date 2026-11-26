@@ -1,4 +1,4 @@
-import { act, useState, type ReactNode } from 'react';
+import { act, lazy, Suspense, useState, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -93,5 +93,23 @@ describe('captureElement on a live React tree', () => {
     const output = container.querySelector('output');
     expect(output === null ? null : hoverLabel(output)).toBe('DebtorField · output');
     expect(hoverLabel(document.body)).toBe('body');
+  });
+
+  it('names a component loaded through React.lazy, as Next 14 loads client components', async () => {
+    const LazyDebtorField = lazy(async () => ({ default: DebtorField }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <Suspense fallback={null}>
+          <LazyDebtorField label="Người vay" phone="0912345678" amount="1" />
+        </Suspense>,
+      );
+    });
+
+    const capture = await captureElement(button(container), identity);
+    expect(capture.components[0]?.name).toBe('DebtorField');
+    expect(hoverLabel(button(container))).toBe('DebtorField · button');
   });
 });
