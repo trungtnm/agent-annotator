@@ -59,7 +59,8 @@ export function DevAnnotatorMount() {
 }
 ```
 
-Then render `<DevAnnotatorMount />` inside `<body>` in `app/layout.tsx`. [Full Next.js guide →](docs/guide-nextjs.md)
+Then render `<DevAnnotatorMount />` inside `<body>` in `app/layout.tsx`. On the **Pages Router**, render it
+next to `<Component {...pageProps} />` in `pages/_app.tsx`. [Full Next.js guide →](docs/guide-nextjs.md)
 
 **Vite**:
 
@@ -167,12 +168,12 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 
 ## Requirements
 
-- **React 18 or 19** in development mode. Source locations come from React 18's `_debugSource`
-  (stamped by the dev JSX transform) or React 19's `_debugStack`; a production build has
-  neither, which is also why the overlay belongs in dev only.
+- **React 18 or 19**, in development mode: a production build carries no source locations.
 - **Next.js 15** (webpack or Turbopack), **Next.js 14** or **Vite**, or any dev server that exposes source maps
   beside its scripts or inline. Without one, the prompt still names the component chain and
   gives the bundled line, flagged as approximate.
+- On **Next.js 14**, the App Router runs its own React build, which records no source locations:
+  the prompt names the components there but not the JSX line. The Pages Router gets exact lines.
 - Screenshots use the Screen Capture API: Chromium browsers on `localhost` or `https`. The browser
   asks once per capture; choose **This tab**.
 
@@ -208,12 +209,6 @@ tooltip shows them, and [the editor guide](docs/screenshot-editor.md) lists them
 
 **Which agent does the prompt target?** Any. It is plain Markdown that tells the agent what each
 field means and how to work through the comments.
-
-**Does it work with React 18?** Yes. React 18 records each element's file and line itself
-(`_debugSource`), so the prompt gets exact source locations without a source-map lookup. One
-exception: Next.js 14's App Router runs its own React canary, which records no source location,
-so there the prompt names the components but not the JSX line. Its Pages Router uses your React 18
-and gets exact locations.
 
 **Can I try it without installing?** Clone the repo and run the demo:
 `pnpm install && pnpm --dir examples/demo install && pnpm --dir examples/demo dev`.

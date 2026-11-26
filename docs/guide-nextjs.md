@@ -55,6 +55,24 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 Living in the root layout, it survives client-side navigation, so one prompt can cover several
 pages.
 
+On the Pages Router, keep the same component outside `app/` (here, `dev-annotator.tsx` at the
+project root) and render it in `pages/_app.tsx`:
+
+```tsx
+// pages/_app.tsx
+import type { AppProps } from 'next/app';
+import { DevAnnotatorMount } from '../dev-annotator';
+
+export default function App({ Component, pageProps }: AppProps) {
+  return (
+    <>
+      <Component {...pageProps} />
+      <DevAnnotatorMount />
+    </>
+  );
+}
+```
+
 ## 3. In a monorepo, tell it where the app lives
 
 Next maps sources relative to the app. Pass the app's folder from the repo root and every path in
