@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState, type ReactNode } from 'react';
+import { useState, version as reactVersion, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DevAnnotator } from './annotator';
@@ -57,7 +57,11 @@ describe('DevAnnotator', () => {
     const prompt = writeText.mock.calls[0]?.[0] ?? '';
     expect(prompt).toContain('## 1. Chữ phải đậm hơn');
     expect(prompt).toContain('**Components, nearest first:** `Counter`');
-    expect(prompt).toContain('apps/backoffice/src/page.tsx');
+    // React 19 hands over a stack frame, mapped by `resolveFrames` above; React 18 hands over
+    // the original location itself, so the resolver is never asked.
+    expect(prompt).toMatch(
+      reactVersion.startsWith('18.') ? /`[^`]*\/src\/annotator\.test\.tsx:\d+:\d+`/ : /`apps\/backoffice\/src\/page\.tsx:\d+`/,
+    );
     expect(prompt).toContain('**Data of `Counter`**');
     expect(prompt).toContain('"state": [\n    1\n  ]');
   });

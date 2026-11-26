@@ -28,3 +28,21 @@ jobs:
       # dist/ is committed so the repo works as a git dependency; it must match the source.
       - name: dist is up to date
         run: git diff --exit-code -- dist
+
+  react-18:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The peer range includes React 18: run the same typecheck and tests against it.
+      - name: switch to React 18
+        run: |
+          npm pkg set 'pnpm.overrides.@types/react=18.3.12' 'pnpm.overrides.@types/react-dom=18.3.1'
+          pnpm add -D react@18.3.1 react-dom@18.3.1 @types/react@18.3.12 @types/react-dom@18.3.1
+      - run: pnpm typecheck
+      - run: pnpm test

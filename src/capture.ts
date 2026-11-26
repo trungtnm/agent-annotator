@@ -1,5 +1,5 @@
 import { describeAccessibility, nearbyText, sectionPath } from './context';
-import { componentAncestors, componentName, componentState, debugStackOf, fiberOf, type Fiber } from './fiber';
+import { componentAncestors, componentName, componentState, debugSourceOf, debugStackOf, fiberOf, type Fiber } from './fiber';
 import { cssSelector, controlValue, describeElement, elementText } from './selector';
 import { DEFAULT_REDACTOR, type Redactor } from './redaction';
 import { DEFAULT_LIMITS, toSnapshot, type Snapshot } from './serialize';
@@ -88,16 +88,18 @@ export async function captureElement(
   const fiber = fiberOf(element);
   const components = fiber === null ? [] : componentAncestors(fiber);
 
-  // One request maps every frame: the element's own JSX site, then each component's.
-  const sites: Array<RawFrame | null> = [fiber, ...components.slice(0, LOCATED_COMPONENTS)].map((f) =>
+  // React 18 hands over source locations directly; React 19 hands over stack frames,
+  // and one request maps every frame: the element's own JSX site, then each component's.
+  const sites: Array<Site | null> = [fiber, ...components.slice(0, LOCATED_COMPONENTS)].map((f) =>
     f === null ? null : siteOf(f),
   );
-  const wanted = sites.filter((site): site is RawFrame => site !== null);
+  const wanted = sites.flatMap((site) => (site !== null && 'frame' in site ? [site.frame] : []));
   const resolved = wanted.length > 0 ? await resolve(wanted) : [];
-  const locations = new Map<RawFrame, SourceLocation | undefined>(wanted.map((site, index) => [site, resolved[index]]));
+  const locations = new Map<RawFrame, SourceLocation | undefined>(wanted.map((frame, index) => [frame, resolved[index]]));
   // A frame inside the framework says only that Next rendered the component: drop it.
-  const locate = (site: RawFrame | null | undefined): SourceLocation | null => {
-    const location = site ? locations.get(site) : undefined;
+  const locate = (site: Site | null | undefined): SourceLocation | null => {
+    if (site === null || site === undefined) return null;
+    const location = 'location' in site ? site.location : locations.get(site.frame);
     return location === undefined || location.ignored === true ? null : location;
   };
 
@@ -135,9 +137,15 @@ export async function captureElement(
   };
 }
 
-function siteOf(fiber: Fiber): RawFrame | null {
+/** A source location React already knows (React 18), or a stack frame still to map (React 19). */
+type Site = { readonly location: SourceLocation } | { readonly frame: RawFrame };
+
+function siteOf(fiber: Fiber): Site | null {
+  const location = debugSourceOf(fiber);
+  if (location !== null) return { location };
   const stack = debugStackOf(fiber);
-  return stack === null ? null : callSiteFrame(stack);
+  const frame = stack === null ? null : callSiteFrame(stack);
+  return frame === null ? null : { frame };
 }
 
 function notableStyles(style: CSSStyleDeclaration): Record<string, string> {
